@@ -1,0 +1,313 @@
+#!/usr/bin/env python3
+"""
+validador.py — Validación contra JSON Schema, reconciliación de totales y flags de calidad
+"""
+
+import json
+from pathlib import Path
+from typing import Dict, List, Any, Tuple, Optional
+from jsonschema import validate, ValidationError
+
+
+def validate_schema(payload: Dict[str, Any], schema_path: str = "schemas/emcali_v1.json") -> List[str]:
+    """
+    Valida el payload contra el JSON Schema.
+    
+    Args:
+        payload: Datos a validar
+        schema_path: Ruta al archivo de esquema
+        
+    Returns:
+        Lista de mensajes de error (vacía si OK)
+    """
+    errores = []
+    
+    try:
+        # Cargar esquema
+        schema_file = Path(schema_path)
+        if not schema_file.exists():
+            errores.append(f"No se encontró el archivo de esquema: {schema_path}")
+            return errores
+        
+        with open(schema_file, 'r', encoding='utf-8') as f:
+            schema = json.load(f)
+        
+        # Validar payload
+        validate(instance=payload, schema=schema)
+        
+    except ValidationError as e:
+        # Extraer información del error de validación
+        path = " -> ".join(str(p) for p in e.path) if e.path else "root"
+        errores.append(f"Error de validación en {path}: {e.message}")
+        
+    except json.JSONDecodeError as e:
+        errores.append(f"Error al parsear el esquema JSON: {e}")
+        
+    except Exception as e:
+        errores.append(f"Error inesperado en validación: {e}")
+    
+    return errores
+
+
+def reconciliar(canonica: Dict[str, Any]) -> Tuple[bool, float]:
+    """
+    Reconcilia los totales de la factura.
+    
+    Args:
+        canonica: Datos canónicos de la factura
+        
+    Returns:
+        Tupla (balance_ok, delta)
+    """
+    if not isinstance(canonica, dict):
+        return False, 0.0
+    
+    # Extraer valores con manejo seguro
+    def safe_float(value, default=0.0):
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return default
+    
+    # Calcular suma de todos los componentes
+    suma = 0.0
+    
+    # Energía
+    if 'energia' in canonica and isinstance(canonica['energia'], dict):
+        suma += safe_float(canonica['energia'].get('total_cop'))
+    
+    # Acueducto
+    if 'acueducto' in canonica and isinstance(canonica['acueducto'], dict):
+        suma += safe_float(canonica['acueducto'].get('total_cop'))
+    
+    # Alcantarillado
+    if 'alcantarillado' in canonica and isinstance(canonica['alcantarillado'], dict):
+        suma += safe_float(canonica['alcantarillado'].get('total_cop'))
+    
+    # Aseo
+    if 'aseo' in canonica and isinstance(canonica['aseo'], dict):
+        suma += safe_float(canonica['aseo'].get('total_cop'))
+    
+    # Alumbrado público
+    if 'alumbrado_publico' in canonica and isinstance(canonica['alumbrado_publico'], dict):
+        suma += safe_float(canonica['alumbrado_publico'].get('total_cop'))
+    
+    # Tasa de seguridad
+    if 'tasa_seguridad' in canonica and isinstance(canonica['tasa_seguridad'], dict):
+        suma += safe_float(canonica['tasa_seguridad'].get('total_cop'))
+    
+    # Otros
+    if 'otros' in canonica and isinstance(canonica['otros'], dict):
+        suma += safe_float(canonica['otros'].get('total_cop'))
+    
+    # IVA
+    suma += safe_float(canonica.get('iva_total_cop'))
+    
+    # Total a pagar
+    total_pagar = safe_float(canonica.get('total_pagar_cop'))
+    
+    # Calcular delta y verificar balance
+    delta = abs(suma - total_pagar)
+    balance_ok = delta <= 1.0  # Tolerancia ±1.0 COP
+    
+    return balance_ok, delta
+
+
+def quality_flags(canonica: Dict[str, Any], schema_errs: List[str], balance_ok: bool, delta: float) -> List[str]:
+    """
+    Genera flags de calidad basados en validaciones.
+    
+    Args:
+        canonica: Datos canónicos
+        schema_errs: Errores de validación del schema
+        balance_ok: Si el balance está correcto
+        delta: Diferencia en el balance
+        
+    Returns:
+        Lista de flags de calidad
+    """
+    flags = []
+    
+    # Flags basados en errores de schema
+    if schema_errs:
+        flags.append("faltan_campos")
+    
+    # Flags basados en balance
+    if not balance_ok:
+        flags.append("desbalance_total")
+        if delta > 1000.0:  # Desbalance significativo
+            flags.append("desbalance_significativo")
+    
+    # Verificar valores negativos
+    def check_negative_values(obj, prefix=""):
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if isinstance(value, (int, float)) and value < 0:
+                    flags.append("valores_negativos")
+                    return
+                elif isinstance(value, dict):
+                    check_negative_values(value, f"{prefix}.{key}")
+    
+    check_negative_values(canonica)
+    
+    # Verificar tarifas inusuales
+    def check_unusual_rates():
+        # Energía: tarifa típica entre 500-1500 COP/kWh
+        if 'energia' in canonica and isinstance(canonica['energia'], dict):
+            tarifa = canonica['energia'].get('cuv_cop_kwh')
+            if tarifa is not None:
+                try:
+                    tarifa_float = float(tarifa)
+                    if tarifa_float < 100 or tarifa_float > 3000:
+                        flags.append("tarifa_inusual")
+                except (ValueError, TypeError):
+                    pass
+        
+        # Acueducto: tarifa típica entre 2000-8000 COP/m³
+        if 'acueducto' in canonica and isinstance(canonica['acueducto'], dict):
+            tarifa = canonica['acueducto'].get('tarifa_cop_m3')
+            if tarifa is not None:
+                try:
+                    tarifa_float = float(tarifa)
+                    if tarifa_float < 500 or tarifa_float > 15000:
+                        flags.append("tarifa_inusual")
+                except (ValueError, TypeError):
+                    pass
+    
+    check_unusual_rates()
+    
+    # Verificar consumos extremos
+    def check_extreme_consumption():
+        # Energía: consumo típico entre 100-10000 kWh
+        if 'energia' in canonica and isinstance(canonica['energia'], dict):
+            consumo = canonica['energia'].get('consumo_kwh')
+            if consumo is not None:
+                try:
+                    consumo_float = float(consumo)
+                    if consumo_float < 10 or consumo_float > 50000:
+                        flags.append("consumo_extremo")
+                except (ValueError, TypeError):
+                    pass
+        
+        # Acueducto: consumo típico entre 10-1000 m³
+        if 'acueducto' in canonica and isinstance(canonica['acueducto'], dict):
+            consumo = canonica['acueducto'].get('consumo_m3')
+            if consumo is not None:
+                try:
+                    consumo_float = float(consumo)
+                    if consumo_float < 1 or consumo_float > 10000:
+                        flags.append("consumo_extremo")
+                except (ValueError, TypeError):
+                    pass
+    
+    check_extreme_consumption()
+    
+    # Verificar fechas
+    def check_dates():
+        if 'periodo_inicio' in canonica and canonica['periodo_inicio']:
+            try:
+                from datetime import datetime
+                fecha = datetime.strptime(canonica['periodo_inicio'], '%Y-%m-%d')
+                if fecha.year < 2020 or fecha.year > 2030:
+                    flags.append("fecha_inusual")
+            except (ValueError, TypeError):
+                flags.append("fecha_invalida")
+    
+    check_dates()
+    
+    # Verificar días facturados
+    if 'dias_facturados' in canonica and canonica['dias_facturados'] is not None:
+        try:
+            dias = float(canonica['dias_facturados'])
+            if dias < 1 or dias > 100:
+                flags.append("dias_facturados_inusual")
+        except (ValueError, TypeError):
+            flags.append("dias_facturados_invalido")
+    
+    return flags
+
+
+def confidence_score(canonica: Dict[str, Any], flags: List[str]) -> float:
+    """
+    Calcula el score de confianza basado en flags de calidad.
+    
+    Args:
+        canonica: Datos canónicos
+        flags: Lista de flags de calidad
+        
+    Returns:
+        Score de confianza entre 0.0 y 1.0
+    """
+    if not isinstance(canonica, dict):
+        return 0.0
+    
+    # Score base
+    score = 1.0
+    
+    # Penalizaciones por flags
+    penalizaciones = {
+        "faltan_campos": 0.3,
+        "desbalance_total": 0.2,
+        "desbalance_significativo": 0.4,
+        "valores_negativos": 0.3,
+        "tarifa_inusual": 0.1,
+        "consumo_extremo": 0.1,
+        "fecha_inusual": 0.1,
+        "fecha_invalida": 0.2,
+        "dias_facturados_inusual": 0.05,
+        "dias_facturados_invalido": 0.1
+    }
+    
+    # Aplicar penalizaciones
+    for flag in flags:
+        if flag in penalizaciones:
+            score -= penalizaciones[flag]
+    
+    # Verificar criterios especiales
+    # Si schema OK y balance OK → confidence ≥ 0.9
+    schema_ok = "faltan_campos" not in flags
+    balance_ok = "desbalance_total" not in flags
+    
+    if schema_ok and balance_ok:
+        score = max(score, 0.9)
+    
+    # Asegurar que el score esté en [0, 1]
+    return max(0.0, min(1.0, score))
+
+
+def validar_factura_completa(payload: Dict[str, Any], schema_path: str = "schemas/emcali_v1.json") -> Dict[str, Any]:
+    """
+    Valida una factura completa y retorna reporte detallado.
+    
+    Args:
+        payload: Payload completo de la factura
+        schema_path: Ruta al esquema
+        
+    Returns:
+        Diccionario con resultados de validación
+    """
+    # Validar schema
+    schema_errors = validate_schema(payload, schema_path)
+    
+    # Extraer canonica
+    canonica = payload.get('canonica', {}) if isinstance(payload, dict) else {}
+    
+    # Reconciliar totales
+    balance_ok, delta = reconciliar(canonica)
+    
+    # Generar flags de calidad
+    flags = quality_flags(canonica, schema_errors, balance_ok, delta)
+    
+    # Calcular score de confianza
+    confidence = confidence_score(canonica, flags)
+    
+    return {
+        "schema_errors": schema_errors,
+        "balance_ok": balance_ok,
+        "delta": delta,
+        "quality_flags": flags,
+        "confidence_score": confidence,
+        "is_valid": len(schema_errors) == 0 and balance_ok and confidence >= 0.7
+    }
