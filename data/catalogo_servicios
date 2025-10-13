@@ -1,0 +1,12 @@
+# Catálogo de servicios EMCALI - Sinónimos y términos relacionados
+# Proveedor: EMCALI (Empresas Municipales de Cali)
+
+canones:
+  energia: ["energía eléctrica", "energia", "kwh", "kilovatios hora", "consumo eléctrico"]
+  acueducto: ["acueducto", "agua potable", "agua", "consumo de agua", "servicio de agua"]
+  alcantarillado: ["alcantarillado", "saneamiento", "alcantarilla", "servicio de alcantarillado"]
+  aseo: ["aseo", "residuos", "basuras", "recolección de basuras", "servicio de aseo"]
+  alumbrado_publico: ["alumbrado público", "ap", "alumbrado publico", "iluminación pública"]
+  tasa_seguridad: ["tasa de seguridad", "ts", "seguridad", "tasa seguridad"]
+  iva: ["iva", "impuesto al valor agregado", "impuesto iva"]
+  otros: ["otros", "varios", "otros conceptos", "conceptos varios", "cargos adicionales"]
