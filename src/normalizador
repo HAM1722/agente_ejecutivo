@@ -1,0 +1,304 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+normalizador.py — Normalización de datos para el pipeline EMCALI
+Módulo separado para funciones de normalización reutilizables
+"""
+
+import re
+import hashlib
+import os
+from typing import Union, Optional
+from datetime import datetime
+
+
+def to_float_us(x: Union[str, float, int, None]) -> Optional[float]:
+    """
+    Convierte un valor a float en formato US (1234.56).
+    Maneja strings con comas como separadores de miles.
+    
+    Args:
+        x: Valor a convertir
+        
+    Returns:
+        Float en formato US o None si no se puede convertir
+    """
+    if x is None:
+        return None
+
+    if isinstance(x, (int, float)):
+        return float(x)
+
+    if isinstance(x, str):
+        # Limpiar espacios y caracteres no numéricos excepto . y ,
+        cleaned = re.sub(r'[^\d.,-]', '', x.strip())
+
+        # Manejar formato con comas (ej: 1,234.56)
+        if ',' in cleaned and '.' in cleaned:
+            # Si hay coma antes del punto, es separador de miles
+            comma_pos = cleaned.find(',')
+            dot_pos = cleaned.find('.')
+            if comma_pos < dot_pos:
+                cleaned = cleaned.replace(',', '')
+
+        # Manejar formato europeo (ej: 1234,56)
+        elif ',' in cleaned and '.' not in cleaned:
+            cleaned = cleaned.replace(',', '.')
+
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+
+    return None
+
+
+def clean_cop(x: Union[str, float, int, None]) -> Optional[float]:
+    """
+    Limpia valores monetarios en COP, removiendo símbolos de moneda.
+    
+    Args:
+        x: Valor monetario a limpiar
+        
+    Returns:
+        Float limpio o None si no se puede convertir
+    """
+    if x is None:
+        return None
+
+    if isinstance(x, (int, float)):
+        return float(x)
+
+    if isinstance(x, str):
+        # Remover símbolos de moneda y espacios
+        cleaned = re.sub(r'[^\d.,-]', '', x.strip())
+        return to_float_us(cleaned)
+
+    return None
+
+
+def percent_to_ratio(x: Union[str, float, None]) -> Optional[float]:
+    """
+    Convierte porcentaje a ratio (ej: "15%" -> 0.15).
+    
+    Args:
+        x: Porcentaje a convertir
+        
+    Returns:
+        Ratio entre 0 y 1, o None si no se puede convertir
+    """
+    if x is None:
+        return None
+
+    if isinstance(x, float):
+        return x / 100.0
+
+    if isinstance(x, str):
+        # Remover símbolo % y espacios
+        cleaned = re.sub(r'[^\d.,-]', '', x.strip())
+        value = to_float_us(cleaned)
+        if value is not None:
+            return value / 100.0
+
+    return None
+
+
+def parse_iso_date(s: Optional[str]) -> Optional[str]:
+    """
+    Parsea fecha a formato ISO (YYYY-MM-DD).
+    Maneja varios formatos comunes.
+    
+    Args:
+        s: String de fecha a parsear
+        
+    Returns:
+        Fecha en formato ISO o None si no se puede parsear
+    """
+    if not s:
+        return None
+
+    if isinstance(s, str):
+        s = s.strip()
+
+        # Ya está en formato ISO
+        if re.match(r'^\d{4}-\d{2}-\d{2}$', s):
+            return s
+
+        # Formato DD/MM/YYYY
+        if re.match(r'^\d{1,2}/\d{1,2}/\d{4}$', s):
+            try:
+                dt = datetime.strptime(s, '%d/%m/%Y')
+                return dt.strftime('%Y-%m-%d')
+            except ValueError:
+                pass
+
+        # Formato MM/DD/YYYY
+        if re.match(r'^\d{1,2}/\d{1,2}/\d{4}$', s):
+            try:
+                dt = datetime.strptime(s, '%m/%d/%Y')
+                return dt.strftime('%Y-%m-%d')
+            except ValueError:
+                pass
+
+        # Formato DD-MM-YYYY
+        if re.match(r'^\d{1,2}-\d{1,2}-\d{4}$', s):
+            try:
+                dt = datetime.strptime(s, '%d-%m-%Y')
+                return dt.strftime('%Y-%m-%d')
+            except ValueError:
+                pass
+
+    return None
+
+
+def file_sha256(path: str) -> str:
+    """
+    Calcula el hash SHA256 de un archivo.
+    
+    Args:
+        path: Ruta al archivo
+        
+    Returns:
+        Hash SHA256 en hexadecimal o string vacío si hay error
+    """
+    sha256_hash = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                sha256_hash.update(chunk)
+        return sha256_hash.hexdigest()
+    except (IOError, OSError):
+        return ""
+
+
+def ensure_dirs(*paths: str) -> None:
+    """
+    Crea directorios si no existen.
+    
+    Args:
+        *paths: Rutas de directorios a crear
+    """
+    for path in paths:
+        if path and not os.path.exists(path):
+            os.makedirs(path, exist_ok=True)
+
+
+def normalize_emcali_data(data: dict) -> dict:
+    """
+    Normaliza datos específicos de EMCALI.
+    
+    Args:
+        data: Diccionario con datos crudos
+        
+    Returns:
+        Diccionario con datos normalizados
+    """
+    normalized = data.copy()
+    
+    # Normalizar campos numéricos
+    numeric_fields = [
+        'total_pagar_cop', 'iva_total_cop', 'dias_facturados',
+        'energia_base_cop', 'energia_total_cop', 'acueducto_total_cop',
+        'alcantarillado_total_cop', 'aseo_total_cop', 'ap_total_cop',
+        'ts_total_cop', 'otros_total_cop'
+    ]
+    
+    for field in numeric_fields:
+        if field in normalized:
+            normalized[field] = to_float_us(normalized[field])
+    
+    # Normalizar campos de fecha
+    date_fields = ['periodo_inicio', 'periodo_fin', 'ultimo_pago_fecha']
+    for field in date_fields:
+        if field in normalized:
+            normalized[field] = parse_iso_date(normalized[field])
+    
+    # Normalizar campos anidados
+    if 'energia' in normalized and isinstance(normalized['energia'], dict):
+        energia = normalized['energia']
+        for key in ['lectura_inicial', 'lectura_final', 'consumo_kwh', 
+                   'cuv_cop_kwh', 'base_cop', 'total_cop']:
+            if key in energia:
+                energia[key] = to_float_us(energia[key])
+    
+    if 'acueducto' in normalized and isinstance(normalized['acueducto'], dict):
+        acueducto = normalized['acueducto']
+        for key in ['consumo_m3', 'tarifa_cop_m3', 'total_cop']:
+            if key in acueducto:
+                acueducto[key] = to_float_us(acueducto[key])
+    
+    if 'alcantarillado' in normalized and isinstance(normalized['alcantarillado'], dict):
+        alcantarillado = normalized['alcantarillado']
+        for key in ['consumo_m3', 'tarifa_cop_m3', 'total_cop']:
+            if key in alcantarillado:
+                alcantarillado[key] = to_float_us(alcantarillado[key])
+    
+    if 'aseo' in normalized and isinstance(normalized['aseo'], dict):
+        aseo = normalized['aseo']
+        if 'total_cop' in aseo:
+            aseo['total_cop'] = to_float_us(aseo['total_cop'])
+    
+    if 'alumbrado_publico' in normalized and isinstance(normalized['alumbrado_publico'], dict):
+        ap = normalized['alumbrado_publico']
+        if 'total_cop' in ap:
+            ap['total_cop'] = to_float_us(ap['total_cop'])
+    
+    if 'tasa_seguridad' in normalized and isinstance(normalized['tasa_seguridad'], dict):
+        ts = normalized['tasa_seguridad']
+        if 'total_cop' in ts:
+            ts['total_cop'] = to_float_us(ts['total_cop'])
+    
+    if 'otros' in normalized and isinstance(normalized['otros'], dict):
+        otros = normalized['otros']
+        if 'total_cop' in otros:
+            otros['total_cop'] = to_float_us(otros['total_cop'])
+        
+        # Normalizar items de otros
+        if 'items' in otros and isinstance(otros['items'], list):
+            for item in otros['items']:
+                if isinstance(item, dict) and 'total_cop' in item:
+                    item['total_cop'] = to_float_us(item['total_cop'])
+    
+    return normalized
+
+
+def validate_normalized_data(data: dict) -> list:
+    """
+    Valida datos normalizados y retorna errores encontrados.
+    
+    Args:
+        data: Datos normalizados a validar
+        
+    Returns:
+        Lista de errores encontrados
+    """
+    errors = []
+    
+    # Validar campos obligatorios
+    required_fields = ['total_pagar_cop']
+    for field in required_fields:
+        if field not in data or data[field] is None:
+            errors.append(f"Campo obligatorio faltante: {field}")
+    
+    # Validar valores numéricos
+    numeric_fields = [
+        'total_pagar_cop', 'iva_total_cop', 'dias_facturados'
+    ]
+    
+    for field in numeric_fields:
+        if field in data and data[field] is not None:
+            if not isinstance(data[field], (int, float)):
+                errors.append(f"Campo numérico inválido: {field}")
+            elif data[field] < 0:
+                errors.append(f"Valor negativo no permitido: {field}")
+    
+    # Validar fechas
+    date_fields = ['periodo_inicio', 'periodo_fin']
+    for field in date_fields:
+        if field in data and data[field] is not None:
+            if not isinstance(data[field], str):
+                errors.append(f"Campo de fecha inválido: {field}")
+            elif not re.match(r'^\d{4}-\d{2}-\d{2}$', data[field]):
+                errors.append(f"Formato de fecha inválido: {field}")
+    
+    return errors
