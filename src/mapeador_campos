@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""
+mapeador_campos.py — Canonización de campos por sinónimos y mapeo inteligente
+"""
+
+import yaml
+from pathlib import Path
+from typing import Dict, List, Any, Optional, Union
+
+
+def load_catalogo(path: str = "data/catalogo_servicios.yml") -> Dict[str, Any]:
+    """
+    Carga el catálogo de servicios desde el archivo YAML.
+    
+    Args:
+        path: Ruta al archivo de catálogo
+        
+    Returns:
+        Diccionario con el catálogo de servicios
+    """
+    try:
+        catalog_path = Path(path)
+        if not catalog_path.exists():
+            raise FileNotFoundError(f"No se encontró el archivo de catálogo: {path}")
+        
+        with open(catalog_path, 'r', encoding='utf-8') as f:
+            catalogo = yaml.safe_load(f)
+        
+        if not catalogo or 'canones' not in catalogo:
+            raise ValueError(f"El archivo {path} no contiene un catálogo válido")
+        
+        return catalogo['canones']
+        
+    except Exception as e:
+        raise Exception(f"Error al cargar el catálogo: {e}")
+
+
+def clasificar_item(label: str, catalogo: Dict[str, Any]) -> Optional[str]:
+    """
+    Clasifica un item por su etiqueta usando el catálogo de sinónimos.
+    
+    Args:
+        label: Etiqueta del item a clasificar
+        catalogo: Catálogo de servicios cargado
+        
+    Returns:
+        Clave canónica del servicio o None si no se encuentra
+    """
+    if not label or not isinstance(label, str):
+        return None
+    
+    # Normalizar label para comparación
+    label_normalizado = label.strip().lower()
+    
+    # Buscar en cada categoría del catálogo
+    for categoria, sinonimos in catalogo.items():
+        if isinstance(sinonimos, list):
+            for sinonimo in sinonimos:
+                if isinstance(sinonimo, str) and sinonimo.lower() in label_normalizado:
+                    return categoria
+    
+    return None
+
+
+def canonizar(raw_line_items: List[Dict[str, Any]], canonica: Dict[str, Any], catalogo: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Canoniza los datos usando raw_line_items y el catálogo de sinónimos.
+    
+    Args:
+        raw_line_items: Lista de items crudos extraídos
+        canonica: Datos canónicos ya extraídos
+        catalogo: Catálogo de servicios
+        
+    Returns:
+        canonica_enriquecida con datos completados/corregidos
+    """
+    # Crear copia para no modificar el original
+    canonica_enriquecida = canonica.copy()
+    
+    # Inicializar estructura si no existe
+    if 'otros' not in canonica_enriquecida:
+        canonica_enriquecida['otros'] = {'items': [], 'total_cop': 0.0}
+    
+    # Contadores para servicios específicos
+    contadores = {
+        'aseo': 0.0,
+        'alumbrado_publico': 0.0,
+        'tasa_seguridad': 0.0,
+        'otros': 0.0
+    }
+    
+    # Procesar cada item crudo
+    for item in raw_line_items:
+        if not isinstance(item, dict):
+            continue
+        
+        label = item.get('label', '')
+        value = item.get('value', 0)
+        section = item.get('section', '')
+        
+        # Intentar convertir value a float
+        try:
+            if isinstance(value, str):
+                # Limpiar símbolos de moneda y espacios
+                import re
+                value_clean = re.sub(r'[^\d.,-]', '', value.strip())
+                value_clean = value_clean.replace(',', '.')
+                value_float = float(value_clean) if value_clean else 0.0
+            else:
+                value_float = float(value) if value else 0.0
+        except (ValueError, TypeError):
+            value_float = 0.0
+        
+        # Clasificar el item
+        categoria = clasificar_item(label, catalogo)
+        
+        if categoria and categoria in contadores:
+            contadores[categoria] += value_float
+            
+            # Si es "otros", agregar al array de items
+            if categoria == 'otros':
+                canonica_enriquecida['otros']['items'].append({
+                    'label': label,
+                    'total_cop': value_float
+                })
+    
+    # Completar totales faltantes en canonica_enriquecida
+    # Solo completar si no existen o son 0/null
+    
+    # Aseo
+    if 'aseo' not in canonica_enriquecida or not canonica_enriquecida['aseo']:
+        canonica_enriquecida['aseo'] = {'total_cop': contadores['aseo']}
+    elif isinstance(canonica_enriquecida['aseo'], dict):
+        if not canonica_enriquecida['aseo'].get('total_cop'):
+            canonica_enriquecida['aseo']['total_cop'] = contadores['aseo']
+    
+    # Alumbrado público
+    if 'alumbrado_publico' not in canonica_enriquecida or not canonica_enriquecida['alumbrado_publico']:
+        canonica_enriquecida['alumbrado_publico'] = {'total_cop': contadores['alumbrado_publico']}
+    elif isinstance(canonica_enriquecida['alumbrado_publico'], dict):
+        if not canonica_enriquecida['alumbrado_publico'].get('total_cop'):
+            canonica_enriquecida['alumbrado_publico']['total_cop'] = contadores['alumbrado_publico']
+    
+    # Tasa de seguridad
+    if 'tasa_seguridad' not in canonica_enriquecida or not canonica_enriquecida['tasa_seguridad']:
+        canonica_enriquecida['tasa_seguridad'] = {'total_cop': contadores['tasa_seguridad']}
+    elif isinstance(canonica_enriquecida['tasa_seguridad'], dict):
+        if not canonica_enriquecida['tasa_seguridad'].get('total_cop'):
+            canonica_enriquecida['tasa_seguridad']['total_cop'] = contadores['tasa_seguridad']
+    
+    # Actualizar total de otros
+    canonica_enriquecida['otros']['total_cop'] = contadores['otros']
+    
+    return canonica_enriquecida
+
+
+def validar_canonizacion(canonica_enriquecida: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Valida y limpia la canonización realizada.
+    
+    Args:
+        canonica_enriquecida: Datos canonizados
+        
+    Returns:
+        Datos validados y limpios
+    """
+    # Asegurar que los valores numéricos sean float o None
+    for servicio in ['aseo', 'alumbrado_publico', 'tasa_seguridad']:
+        if servicio in canonica_enriquecida and isinstance(canonica_enriquecida[servicio], dict):
+            total = canonica_enriquecida[servicio].get('total_cop')
+            if total is not None:
+                try:
+                    canonica_enriquecida[servicio]['total_cop'] = float(total)
+                except (ValueError, TypeError):
+                    canonica_enriquecida[servicio]['total_cop'] = None
+    
+    # Validar otros
+    if 'otros' in canonica_enriquecida and isinstance(canonica_enriquecida['otros'], dict):
+        total_otros = canonica_enriquecida['otros'].get('total_cop')
+        if total_otros is not None:
+            try:
+                canonica_enriquecida['otros']['total_cop'] = float(total_otros)
+            except (ValueError, TypeError):
+                canonica_enriquecida['otros']['total_cop'] = None
+    
+    return canonica_enriquecida
