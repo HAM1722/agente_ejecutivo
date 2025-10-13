@@ -1,0 +1,714 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+extractor_ocr.py — Extractor OCR genérico y layout-agnóstico para facturas EMCALI
+"""
+
+import re
+import yaml
+import hashlib
+import io
+import fitz  # PyMuPDF
+import pytesseract
+from PIL import Image
+import numpy as np
+from pathlib import Path
+from typing import Dict, List, Any, Optional, Tuple
+from datetime import datetime
+import cv2
+
+# Configurar tesseract para español
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+
+class ExtractorOCR:
+    """
+    Extractor OCR genérico y layout-agnóstico para facturas EMCALI.
+    Utiliza anclas semánticas y patrones regex para encontrar campos.
+    """
+    
+    def __init__(self, config_path: str = "config/sinonimos.yml"):
+        """
+        Inicializa el extractor con configuración de sinónimos.
+        
+        Args:
+            config_path: Ruta al archivo de configuración de sinónimos
+        """
+        self.config = self._cargar_configuracion(config_path)
+        self.texto_por_pagina = []
+        self.needs_ocr = False
+        
+    def _cargar_configuracion(self, config_path: str) -> Dict[str, Any]:
+        """Carga la configuración de sinónimos desde YAML."""
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                return yaml.safe_load(f)
+        except FileNotFoundError:
+            print(f"⚠️ Archivo de configuración no encontrado: {config_path}")
+            return {}
+        except Exception as e:
+            print(f"❌ Error cargando configuración: {e}")
+            return {}
+    
+    def extraer_texto_pdf(self, ruta_pdf: str, force_ocr: bool = False) -> str:
+        """
+        Extrae texto del PDF usando OCR híbrido.
+        
+        Args:
+            ruta_pdf: Ruta al archivo PDF
+            force_ocr: Si forzar OCR aunque haya texto embebido
+            
+        Returns:
+            Texto extraído del PDF
+        """
+        try:
+            doc = fitz.open(ruta_pdf)
+            texto_completo = ""
+            self.texto_por_pagina = []
+            
+            for pagina_num in range(len(doc)):
+                pagina = doc.load_page(pagina_num)
+                
+                # Intentar extraer texto embebido primero
+                texto_embebido = pagina.get_text()
+                
+                # Si no hay texto embebido o se fuerza OCR, usar OCR
+                if force_ocr or len(texto_embebido.strip()) < 100:
+                    self.needs_ocr = True
+                    texto_pagina = self._ocr_pagina(pagina, pagina_num)
+                else:
+                    texto_pagina = texto_embebido
+                
+                self.texto_por_pagina.append(texto_pagina)
+                texto_completo += texto_pagina + "\n"
+            
+            doc.close()
+            return texto_completo.strip()
+            
+        except Exception as e:
+            print(f"❌ Error extrayendo texto de {ruta_pdf}: {e}")
+            return ""
+    
+    def _ocr_pagina(self, pagina, pagina_num: int) -> str:
+        """
+        Realiza OCR en una página del PDF.
+        
+        Args:
+            pagina: Página de PyMuPDF
+            pagina_num: Número de página
+            
+        Returns:
+            Texto extraído por OCR
+        """
+        try:
+            # Renderizar página a imagen
+            mat = fitz.Matrix(2.0, 2.0)  # Escala 2x para mejor calidad
+            pix = pagina.get_pixmap(matrix=mat)
+            
+            # Convertir a PIL Image
+            img_data = pix.tobytes("png")
+            img = Image.open(io.BytesIO(img_data))
+            
+            # Preprocesar imagen
+            img_procesada = self._preprocesar_imagen(img)
+            
+            # OCR con configuración para español
+            texto = pytesseract.image_to_string(
+                img_procesada,
+                lang='spa',
+                config='--psm 6 --oem 3'
+            )
+            
+            return texto
+            
+        except Exception as e:
+            print(f"⚠️ Error en OCR página {pagina_num}: {e}")
+            return ""
+    
+    def _preprocesar_imagen(self, img: Image.Image) -> Image.Image:
+        """
+        Preprocesa imagen para mejorar OCR.
+        
+        Args:
+            img: Imagen PIL
+            
+        Returns:
+            Imagen preprocesada
+        """
+        # Convertir a numpy array
+        img_array = np.array(img)
+        
+        # Convertir a escala de grises si es necesario
+        if len(img_array.shape) == 3:
+            img_gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+        else:
+            img_gray = img_array
+        
+        # Aplicar binarización adaptativa
+        img_bin = cv2.adaptiveThreshold(
+            img_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
+        )
+        
+        # Aplicar morfología para limpiar ruido
+        kernel = np.ones((1, 1), np.uint8)
+        img_clean = cv2.morphologyEx(img_bin, cv2.MORPH_CLOSE, kernel)
+        
+        # Convertir de vuelta a PIL
+        return Image.fromarray(img_clean)
+    
+    def extraer_datos(self, texto: str) -> Dict[str, Any]:
+        """
+        Extrae datos estructurados del texto usando anclas semánticas.
+        
+        Args:
+            texto: Texto extraído del PDF
+            
+        Returns:
+            Diccionario con datos extraídos
+        """
+        datos = {
+            # Identificación
+            "contrato": None,
+            "cude": None,
+            "npe": None,
+            "estado_cuenta_numero": None,
+            
+            # Período
+            "mes_cuenta": None,
+            "periodo_inicio": None,
+            "periodo_fin": None,
+            "dias_facturados": None,
+            
+            # Cliente
+            "uso_clase": None,
+            "direccion_suministro": None,
+            "ruta": None,
+            "ciclo": None,
+            
+            # Energía (COP)
+            "energia_base_cop": None,
+            "energia_total_cop": None,
+            "ap_cop": None,
+            "ts_cop": None,
+            "iva_cop": None,
+            "otros_cargos_cop": [],
+            "total_pagar_cop": None,
+            
+            # Agua/Aseo
+            "acueducto_cop": None,
+            "alcantarillado_cop": None,
+            "aseo_cop": None,
+            "acueducto_m3": None,
+            "alcantarillado_m3": None,
+            "tarifas_unitarias": [],
+            
+            # Pagos
+            "ultimo_pago_fecha": None,
+            "ultimo_pago_valor_cop": None,
+            
+            # Metadatos
+            "needs_ocr": self.needs_ocr,
+            "confidence_score": 1.0,
+            "confidence_reasons": [],
+            
+            # Banderas de validación
+            "reconciliacion_ok": False,
+            "periodo_ok": False,
+            "cude_ok": False,
+            "completitud_ok": False,
+            "reconciliacion_diff_cop": 0.0
+        }
+        
+        # Extraer cada campo usando anclas semánticas
+        datos.update(self._extraer_identificacion(texto))
+        datos.update(self._extraer_periodo(texto))
+        datos.update(self._extraer_cliente(texto))
+        datos.update(self._extraer_energia(texto))
+        datos.update(self._extraer_agua_aseo(texto))
+        datos.update(self._extraer_pagos(texto))
+        
+        # Validar y calcular banderas
+        self._validar_datos(datos)
+        
+        return datos
+    
+    def _extraer_identificacion(self, texto: str) -> Dict[str, Any]:
+        """Extrae datos de identificación."""
+        datos = {}
+        
+        # Contrato
+        for sinonimo in self.config.get('identificacion', {}).get('contrato', []):
+            match = self._buscar_con_valor(texto, sinonimo)
+            if match:
+                datos['contrato'] = self._limpiar_contrato(match)
+                break
+        
+        # CUDE
+        for sinonimo in self.config.get('identificacion', {}).get('cude', []):
+            match = self._buscar_con_valor(texto, sinonimo)
+            if match:
+                datos['cude'] = self._limpiar_cude(match)
+                break
+        
+        # Si no se encontró CUDE con sinónimos, buscar con patrones
+        if not datos.get('cude'):
+            for patron in self.config.get('cude', {}).get('patrones', []):
+                matches = re.findall(patron, texto, re.IGNORECASE)
+                if matches:
+                    datos['cude'] = matches[0]
+                    break
+        
+        # NPE
+        for sinonimo in self.config.get('identificacion', {}).get('npe', []):
+            match = self._buscar_con_valor(texto, sinonimo)
+            if match:
+                datos['npe'] = match.strip()
+                break
+        
+        # Estado de cuenta
+        for sinonimo in self.config.get('identificacion', {}).get('estado_cuenta', []):
+            match = self._buscar_con_valor(texto, sinonimo)
+            if match:
+                datos['estado_cuenta_numero'] = match.strip()
+                break
+        
+        return datos
+    
+    def _extraer_periodo(self, texto: str) -> Dict[str, Any]:
+        """Extrae datos del período de facturación."""
+        datos = {}
+        
+        # Mes de cuenta
+        for sinonimo in self.config.get('periodo', {}).get('mes_cuenta', []):
+            match = self._buscar_con_valor(texto, sinonimo)
+            if match:
+                datos['mes_cuenta'] = match.strip()
+                break
+        
+        # Período inicio
+        for sinonimo in self.config.get('periodo', {}).get('periodo_inicio', []):
+            match = self._buscar_con_valor(texto, sinonimo)
+            if match:
+                datos['periodo_inicio'] = self._normalizar_fecha(match)
+                break
+        
+        # Período fin
+        for sinonimo in self.config.get('periodo', {}).get('periodo_fin', []):
+            match = self._buscar_con_valor(texto, sinonimo)
+            if match:
+                datos['periodo_fin'] = self._normalizar_fecha(match)
+                break
+        
+        # Días facturados
+        for sinonimo in self.config.get('periodo', {}).get('dias_facturados', []):
+            match = self._buscar_con_valor(texto, sinonimo)
+            if match:
+                datos['dias_facturados'] = self._extraer_numero(match)
+                break
+        
+        return datos
+    
+    def _extraer_cliente(self, texto: str) -> Dict[str, Any]:
+        """Extrae datos del cliente."""
+        datos = {}
+        
+        # Uso clase
+        for sinonimo in self.config.get('uso_clase', []):
+            match = self._buscar_con_valor(texto, sinonimo)
+            if match:
+                datos['uso_clase'] = match.strip()
+                break
+        
+        # Dirección
+        for sinonimo in self.config.get('direccion', []):
+            match = self._buscar_con_valor(texto, sinonimo)
+            if match:
+                datos['direccion_suministro'] = match.strip()
+                break
+        
+        # Ruta
+        for sinonimo in self.config.get('ruta_ciclo', {}).get('ruta', []):
+            match = self._buscar_con_valor(texto, sinonimo)
+            if match:
+                datos['ruta'] = match.strip()
+                break
+        
+        # Ciclo
+        for sinonimo in self.config.get('ruta_ciclo', {}).get('ciclo', []):
+            match = self._buscar_con_valor(texto, sinonimo)
+            if match:
+                datos['ciclo'] = match.strip()
+                break
+        
+        return datos
+    
+    def _extraer_energia(self, texto: str) -> Dict[str, Any]:
+        """Extrae datos de energía."""
+        datos = {}
+        
+        # Energía base
+        for sinonimo in self.config.get('energia', {}).get('energia_base', []):
+            match = self._buscar_con_valor(texto, sinonimo)
+            if match:
+                datos['energia_base_cop'] = self._normalizar_moneda(match)
+                break
+        
+        # Energía total
+        for sinonimo in self.config.get('energia', {}).get('energia_total', []):
+            match = self._buscar_con_valor(texto, sinonimo)
+            if match:
+                datos['energia_total_cop'] = self._normalizar_moneda(match)
+                break
+        
+        # Alumbrado público
+        for sinonimo in self.config.get('energia', {}).get('ap', []):
+            match = self._buscar_con_valor(texto, sinonimo)
+            if match:
+                datos['ap_cop'] = self._normalizar_moneda(match)
+                break
+        
+        # Tasa seguridad
+        for sinonimo in self.config.get('energia', {}).get('ts', []):
+            match = self._buscar_con_valor(texto, sinonimo)
+            if match:
+                datos['ts_cop'] = self._normalizar_moneda(match)
+                break
+        
+        # IVA
+        for sinonimo in self.config.get('energia', {}).get('iva', []):
+            match = self._buscar_con_valor(texto, sinonimo)
+            if match:
+                datos['iva_cop'] = self._normalizar_moneda(match)
+                break
+        
+        # Total a pagar
+        for sinonimo in self.config.get('energia', {}).get('total_pagar', []):
+            match = self._buscar_con_valor(texto, sinonimo)
+            if match:
+                datos['total_pagar_cop'] = self._normalizar_moneda(match)
+                break
+        
+        # Otros cargos (buscar múltiples)
+        otros_cargos = []
+        for sinonimo in self.config.get('energia', {}).get('otros_cargos', []):
+            matches = self._buscar_todos_con_valor(texto, sinonimo)
+            for match in matches:
+                nombre = sinonimo
+                valor = self._normalizar_moneda(match)
+                if valor:
+                    otros_cargos.append({"nombre": nombre, "valor": valor})
+        
+        datos['otros_cargos_cop'] = otros_cargos
+        
+        return datos
+    
+    def _extraer_agua_aseo(self, texto: str) -> Dict[str, Any]:
+        """Extrae datos de agua y aseo."""
+        datos = {}
+        
+        # Acueducto
+        for sinonimo in self.config.get('agua_aseo', {}).get('acueducto', []):
+            match = self._buscar_con_valor(texto, sinonimo)
+            if match:
+                datos['acueducto_cop'] = self._normalizar_moneda(match)
+                break
+        
+        # Alcantarillado
+        for sinonimo in self.config.get('agua_aseo', {}).get('alcantarillado', []):
+            match = self._buscar_con_valor(texto, sinonimo)
+            if match:
+                datos['alcantarillado_cop'] = self._normalizar_moneda(match)
+                break
+        
+        # Aseo
+        for sinonimo in self.config.get('agua_aseo', {}).get('aseo', []):
+            match = self._buscar_con_valor(texto, sinonimo)
+            if match:
+                datos['aseo_cop'] = self._normalizar_moneda(match)
+                break
+        
+        return datos
+    
+    def _extraer_pagos(self, texto: str) -> Dict[str, Any]:
+        """Extrae datos de pagos."""
+        datos = {}
+        
+        # Último pago
+        for sinonimo in self.config.get('pagos', {}).get('ultimo_pago', []):
+            match = self._buscar_con_valor(texto, sinonimo)
+            if match:
+                # Intentar extraer fecha y valor
+                fecha_match = re.search(r'\d{1,2}/\d{1,2}/\d{4}', match)
+                valor_match = re.search(r'[\d,]+\.?\d*', match)
+                
+                if fecha_match:
+                    datos['ultimo_pago_fecha'] = self._normalizar_fecha(fecha_match.group())
+                if valor_match:
+                    datos['ultimo_pago_valor_cop'] = self._normalizar_moneda(valor_match.group())
+                break
+        
+        return datos
+    
+    def _buscar_con_valor(self, texto: str, sinonimo: str) -> Optional[str]:
+        """
+        Busca un sinónimo y extrae el valor asociado.
+        
+        Args:
+            texto: Texto donde buscar
+            sinonimo: Sinónimo a buscar
+            
+        Returns:
+            Valor encontrado o None
+        """
+        # Buscar el sinónimo en el texto
+        pattern = re.escape(sinonimo)
+        matches = re.finditer(pattern, texto, re.IGNORECASE)
+        
+        for match in matches:
+            # Buscar valor en la misma línea o líneas adyacentes
+            lineas = texto.split('\n')
+            
+            # Encontrar el índice de la línea donde está el match
+            pos_actual = 0
+            linea_idx = 0
+            for i, linea in enumerate(lineas):
+                if pos_actual <= match.start() < pos_actual + len(linea) + 1:
+                    linea_idx = i
+                    break
+                pos_actual += len(linea) + 1
+            
+            # Buscar en línea actual y ±2 líneas
+            for offset in range(-2, 3):
+                idx = linea_idx + offset
+                if 0 <= idx < len(lineas):
+                    linea = lineas[idx]
+                    
+                    # Buscar valores monetarios
+                    for patron in self.config.get('valores_monetarios', {}).get('patrones_cop', []):
+                        valores = re.findall(patron, linea)
+                        if valores:
+                            return valores[0]
+                    
+                    # Buscar números
+                    numeros = re.findall(r'\d+', linea)
+                    if numeros:
+                        return numeros[0]
+        
+        return None
+    
+    def _buscar_todos_con_valor(self, texto: str, sinonimo: str) -> List[str]:
+        """Busca todos los valores asociados a un sinónimo."""
+        valores = []
+        pattern = re.escape(sinonimo)
+        matches = re.finditer(pattern, texto, re.IGNORECASE)
+        
+        for match in matches:
+            lineas = texto.split('\n')
+            linea_actual = match.start()
+            
+            for offset in range(-2, 3):
+                idx = linea_actual + offset
+                if 0 <= idx < len(lineas):
+                    linea = lineas[idx]
+                    
+                    for patron in self.config.get('valores_monetarios', {}).get('patrones_cop', []):
+                        valores_encontrados = re.findall(patron, linea)
+                        valores.extend(valores_encontrados)
+        
+        return list(set(valores))  # Eliminar duplicados
+    
+    def _normalizar_moneda(self, valor: str) -> Optional[float]:
+        """Normaliza valores monetarios a float."""
+        if not valor:
+            return None
+        
+        # Limpiar símbolos de moneda y espacios
+        valor_limpio = re.sub(r'[^\d.,-]', '', valor.strip())
+        
+        # Manejar formato con comas
+        if ',' in valor_limpio and '.' in valor_limpio:
+            comma_pos = valor_limpio.find(',')
+            dot_pos = valor_limpio.find('.')
+            if comma_pos < dot_pos:
+                valor_limpio = valor_limpio.replace(',', '')
+        
+        # Manejar formato europeo
+        elif ',' in valor_limpio and '.' not in valor_limpio:
+            valor_limpio = valor_limpio.replace(',', '.')
+        
+        try:
+            return float(valor_limpio)
+        except ValueError:
+            return None
+    
+    def _normalizar_fecha(self, fecha: str) -> Optional[str]:
+        """Normaliza fechas a formato YYYY-MM-DD."""
+        if not fecha:
+            return None
+        
+        fecha = fecha.strip()
+        
+        # Ya está en formato ISO
+        if re.match(r'^\d{4}-\d{2}-\d{2}$', fecha):
+            return fecha
+        
+        # Formato DD/MM/YYYY
+        if re.match(r'^\d{1,2}/\d{1,2}/\d{4}$', fecha):
+            try:
+                dt = datetime.strptime(fecha, '%d/%m/%Y')
+                return dt.strftime('%Y-%m-%d')
+            except ValueError:
+                pass
+        
+        # Formato MM/DD/YYYY
+        if re.match(r'^\d{1,2}/\d{1,2}/\d{4}$', fecha):
+            try:
+                dt = datetime.strptime(fecha, '%m/%d/%Y')
+                return dt.strftime('%Y-%m-%d')
+            except ValueError:
+                pass
+        
+        return None
+    
+    def _extraer_numero(self, texto: str) -> Optional[int]:
+        """Extrae número entero del texto."""
+        if not texto:
+            return None
+        
+        numeros = re.findall(r'\d+', texto)
+        if numeros:
+            try:
+                return int(numeros[0])
+            except ValueError:
+                pass
+        
+        return None
+    
+    def _limpiar_contrato(self, contrato: str) -> str:
+        """Limpia número de contrato."""
+        if not contrato:
+            return ""
+        
+        # Extraer solo números
+        numeros = re.findall(r'\d+', contrato)
+        if numeros:
+            return numeros[0]
+        
+        return contrato.strip()
+    
+    def _limpiar_cude(self, cude: str) -> str:
+        """Limpia CUDE."""
+        if not cude:
+            return ""
+        
+        # Remover espacios y caracteres especiales
+        cude_limpio = re.sub(r'[^\w]', '', cude)
+        return cude_limpio
+    
+    def _validar_datos(self, datos: Dict[str, Any]):
+        """Valida los datos extraídos y calcula banderas."""
+        # Conciliación
+        total_calculado = 0.0
+        if datos.get('energia_base_cop'):
+            total_calculado += datos['energia_base_cop']
+        if datos.get('ap_cop'):
+            total_calculado += datos['ap_cop']
+        if datos.get('ts_cop'):
+            total_calculado += datos['ts_cop']
+        if datos.get('iva_cop'):
+            total_calculado += datos['iva_cop']
+        
+        for cargo in datos.get('otros_cargos_cop', []):
+            if cargo.get('valor'):
+                total_calculado += cargo['valor']
+        
+        total_pagar = datos.get('total_pagar_cop', 0) or 0
+        diff = abs(total_calculado - total_pagar)
+        
+        datos['reconciliacion_ok'] = diff <= 1.0
+        datos['reconciliacion_diff_cop'] = diff
+        
+        # Período
+        if datos.get('periodo_inicio') and datos.get('periodo_fin') and datos.get('dias_facturados'):
+            try:
+                inicio = datetime.strptime(datos['periodo_inicio'], '%Y-%m-%d')
+                fin = datetime.strptime(datos['periodo_fin'], '%Y-%m-%d')
+                dias_calculados = (fin - inicio).days + 1
+                dias_facturados = datos['dias_facturados'] or 0
+                datos['periodo_ok'] = abs(dias_calculados - dias_facturados) <= 1
+            except:
+                datos['periodo_ok'] = False
+        
+        # CUDE
+        cude = datos.get('cude', '') or ''
+        datos['cude_ok'] = len(cude) >= 20 and cude.isalnum()
+        
+        # Completitud
+        campos_requeridos = ['contrato', 'total_pagar_cop']
+        campos_periodo = ['periodo_inicio', 'periodo_fin', 'mes_cuenta']
+        campos_dias = ['dias_facturados']
+        
+        tiene_requeridos = all(datos.get(campo) for campo in campos_requeridos)
+        tiene_periodo = any(datos.get(campo) for campo in campos_periodo)
+        tiene_dias = any(datos.get(campo) for campo in campos_dias)
+        
+        datos['completitud_ok'] = tiene_requeridos and (tiene_periodo or tiene_dias)
+        
+        # Calcular confidence score
+        score = 1.0
+        reasons = []
+        
+        if not datos['reconciliacion_ok']:
+            score -= 0.2
+            reasons.append(f"Desbalance de {datos['reconciliacion_diff_cop']:.2f} COP")
+        
+        if not datos['periodo_ok']:
+            score -= 0.1
+            reasons.append("Período inconsistente")
+        
+        if not datos['cude_ok']:
+            score -= 0.1
+            reasons.append("CUDE inválido")
+        
+        if not datos['completitud_ok']:
+            score -= 0.3
+            reasons.append("Datos incompletos")
+        
+        if self.needs_ocr:
+            score -= 0.1
+            reasons.append("OCR requerido")
+        
+        datos['confidence_score'] = max(0.0, score)
+        datos['confidence_reasons'] = reasons
+
+
+def extraer_factura_emcali(ruta_pdf: str, force_ocr: bool = False) -> Dict[str, Any]:
+    """
+    Función principal para extraer datos de una factura EMCALI.
+    
+    Args:
+        ruta_pdf: Ruta al archivo PDF
+        force_ocr: Si forzar OCR
+        
+    Returns:
+        Diccionario con datos extraídos y metadatos
+    """
+    extractor = ExtractorOCR()
+    
+    # Extraer texto
+    texto = extractor.extraer_texto_pdf(ruta_pdf, force_ocr)
+    if not texto:
+        return {"error": "No se pudo extraer texto del PDF"}
+    
+    # Extraer datos
+    datos = extractor.extraer_datos(texto)
+    
+    # Añadir metadatos
+    pdf_path = Path(ruta_pdf)
+    pdf_sha1 = hashlib.sha1(pdf_path.read_bytes()).hexdigest()
+    datos.update({
+        "pdf_filename": pdf_path.name,
+        "pdf_sha1": pdf_sha1,
+        "raw_ocr_text_file": f"{pdf_sha1}.txt"
+    })
+    
+    return datos
