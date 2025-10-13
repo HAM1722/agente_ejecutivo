@@ -1,0 +1,1110 @@
+# -*- coding: utf-8 -*-
+"""
+generador_docx_analisis.py — Genera archivos DOCX y análisis LLM de facturas EMCALI
+Versión mejorada con story, reconciliación y metadatos completos
+"""
+
+import csv
+import json
+import os
+from pathlib import Path
+from typing import Dict, List, Any, Optional
+from datetime import datetime
+from dotenv import load_dotenv
+from openai import OpenAI
+
+# Forzar carga del .env desde la raíz del proyecto
+ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(dotenv_path=ENV_PATH, override=True)
+
+API_KEY = os.getenv("OPENAI_API_KEY")
+if not API_KEY:
+    raise SystemExit("❌ No se encontró OPENAI_API_KEY en .env")
+
+client = OpenAI(api_key=API_KEY)
+
+# Prompt para análisis de factura EMCALI
+PROMPT_ANALISIS_EMCALI = """Eres un analista experto en facturas de servicios públicos EMCALI.
+Analiza la información extraída de la factura y genera un informe detallado y preciso.
+
+INFORMACIÓN DE LA FACTURA:
+{datos_factura}
+
+IMPORTANTE: Usa EXACTAMENTE los valores numéricos proporcionados. No inventes ni redondees valores.
+Si un valor es "7,111.00", úsalo exactamente así. Si es "8,004,574.00", úsalo exactamente así.
+
+TAREA: Genera un análisis completo y preciso que incluya:
+
+## 1. **RESUMEN EJECUTIVO**
+- **Cliente**: [nombre exacto del cliente]
+- **Dirección**: [dirección exacta]
+- **Período**: [fecha desde] a [fecha hasta] ([días] días)
+- **Total a pagar**: [valor exacto] [moneda]
+- **Consumo de energía**: [consumo exacto] kWh
+
+## 2. **ANÁLISIS DE CONSUMO ELÉCTRICO**
+- **Lectura anterior**: [valor exacto] kWh
+- **Lectura actual**: [valor exacto] kWh  
+- **Diferencia**: [diferencia exacta] kWh
+- **Consumo del período**: [consumo exacto] kWh
+- **Consumo diario promedio**: [cálculo preciso] kWh/día
+
+## 3. **DESGLOSE DETALLADO DE COSTOS**
+- **Energía eléctrica**: [valor exacto] [moneda]
+- **Aseo**: [valor exacto] [moneda]
+- **Alumbrado público**: [valor exacto] [moneda]
+- **Tasa de seguridad**: [valor exacto] [moneda]
+- **Subtotal EMCALI**: [valor exacto] [moneda]
+- **IVA**: [valor exacto] [moneda]
+- **Total a pagar**: [valor exacto] [moneda]
+
+## 4. **ANÁLISIS TARIFARIO**
+- **Valor unitario de energía**: [valor exacto] [moneda]/kWh
+- **Costo por kWh consumido**: [cálculo preciso]
+- **Porcentaje de servicios adicionales**: [cálculo preciso]%
+
+## 5. **OBSERVACIONES TÉCNICAS**
+- Análisis del nivel de tensión ([valor])
+- Tipo de medidor: [código del medidor]
+- Operador de red: [nombre exacto]
+- Ciclo de facturación: [número]
+
+## 6. **RECOMENDACIONES**
+- Eficiencia energética
+- Optimización de costos
+- Monitoreo de consumo
+
+FORMATO: Usa formato markdown estructurado. Incluye tablas cuando sea apropiado.
+Usa EXACTAMENTE los valores proporcionados sin modificar números."""
+
+# Prompt para análisis técnico de ingeniero eléctrico
+PROMPT_ANALISIS_TECNICO_ELECTRICO = """Eres un INGENIERO ELÉCTRICO EXPERTO EN ENERGÍA con más de 15 años de experiencia en análisis de sistemas eléctricos, eficiencia energética y facturación de servicios públicos.
+
+Tu cliente te ha proporcionado los datos de su factura EMCALI y necesita un INFORME TÉCNICO PROFESIONAL que explique:
+
+INFORMACIÓN DE LA FACTURA:
+{datos_factura}
+
+TAREA: Genera un INFORME TÉCNICO COMPLETO como ingeniero eléctrico que incluya:
+
+## 1. **ANÁLISIS TÉCNICO DEL CONSUMO ELÉCTRICO**
+
+### 1.1 Caracterización del Consumo
+- **Potencia Promedio Consumida**: Calcular en kW basado en el consumo diario
+- **Factor de Carga**: Análisis de la distribución del consumo en el período
+- **Perfil de Consumo**: Identificar si es residencial, comercial o industrial
+- **Eficiencia del Sistema**: Evaluar si el consumo es normal para el tipo de instalación
+
+### 1.2 Análisis de Lecturas
+- **Diferencia de Lecturas**: Explicar técnicamente por qué se consume esa cantidad
+- **Precisión del Medidor**: Evaluar si las lecturas son coherentes
+- **Posibles Pérdidas**: Identificar si hay fugas o consumos anómalos
+
+## 2. **ANÁLISIS DE TARIFAS Y COSTOS TÉCNICOS**
+
+### 2.1 Estructura Tarifaria
+- **Tarifa Base**: Explicar por qué se aplica esa tarifa unitaria
+- **Componentes de la Tarifa**: Desglose técnico de cada componente
+- **Comparación con Estándares**: Evaluar si la tarifa es competitiva
+
+### 2.2 Análisis de Cargos Adicionales
+- **Alumbrado Público**: Justificación técnica del cargo
+- **Tasa de Seguridad**: Explicar el componente técnico
+- **Otros Servicios**: Análisis de cada cargo adicional
+
+## 3. **DIAGNÓSTICO TÉCNICO DEL SISTEMA**
+
+### 3.1 Evaluación de la Instalación
+- **Nivel de Tensión**: Análisis del nivel de tensión (1 = Baja tensión)
+- **Tipo de Medidor**: Evaluar si el medidor es apropiado
+- **Operador de Red**: Verificar la configuración técnica
+
+### 3.2 Identificación de Problemas
+- **Consumo Anómalo**: Detectar si hay patrones inusuales
+- **Ineficiencias**: Identificar posibles mejoras técnicas
+- **Riesgos Técnicos**: Evaluar la seguridad de la instalación
+
+## 4. **RECOMENDACIONES TÉCNICAS**
+
+### 4.1 Optimización Energética
+- **Medidas de Ahorro**: Recomendaciones técnicas específicas
+- **Mejoras de Eficiencia**: Sugerencias de equipos o sistemas
+- **Cambios de Hábitos**: Consejos técnicos para el usuario
+
+### 4.2 Mantenimiento Preventivo
+- **Revisión de Instalación**: Qué verificar técnicamente
+- **Calibración de Medidor**: Cuándo es necesaria
+- **Actualizaciones**: Mejoras técnicas recomendadas
+
+## 5. **CONCLUSIONES TÉCNICAS**
+
+### 5.1 Resumen Ejecutivo Técnico
+- **Estado de la Instalación**: Evaluación técnica general
+- **Eficiencia del Sistema**: Calificación técnica del consumo
+- **Recomendaciones Prioritarias**: Acciones técnicas más importantes
+
+### 5.2 Próximos Pasos Técnicos
+- **Monitoreo**: Qué parámetros técnicos vigilar
+- **Mejoras**: Plan de acción técnico
+- **Seguimiento**: Cuándo realizar la próxima evaluación
+
+## FORMATO DEL INFORME:
+- Usa lenguaje técnico apropiado pero comprensible
+- Incluye cálculos técnicos cuando sea relevante
+- Proporciona explicaciones técnicas detalladas
+- Usa unidades técnicas correctas (kW, kWh, factor de potencia, etc.)
+- Incluye tablas con datos técnicos cuando sea apropiado
+- Mantén un tono profesional de ingeniero experto
+
+IMPORTANTE: Explica cada valor técnicamente, no solo qué es, sino POR QUÉ tiene ese valor y qué significa para el cliente."""
+
+
+def leer_csv_emcali(ruta_csv: str = "outputs/facturas_emcali.csv") -> List[Dict[str, Any]]:
+    """
+    Lee el archivo CSV con datos extraídos de facturas EMCALI.
+    
+    Args:
+        ruta_csv: Ruta al archivo CSV
+        
+    Returns:
+        Lista de diccionarios con los datos de cada factura
+    """
+    if not Path(ruta_csv).exists():
+        raise FileNotFoundError(f"No se encontró el archivo CSV: {ruta_csv}")
+    
+    facturas = []
+    with open(ruta_csv, 'r', encoding='utf-8') as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            # Limpiar y convertir datos
+            factura_limpia = {}
+            for key, value in row.items():
+                if value == "":
+                    factura_limpia[key] = None
+                elif key in ['dias_facturados']:
+                    try:
+                        factura_limpia[key] = int(value) if value else None
+                    except:
+                        factura_limpia[key] = None
+                elif key in ['energia_kwh', 'energia_unitario_cop_kwh', 'energia_valor_total', 
+                           'energia_total_bloque', 'aseo_total', 'alumbrado_publico_total', 
+                           'tasa_seguridad_total', 'subtotal_emcali', 'iva', 'total_operacion_mes', 
+                           'total_a_pagar', 'lectura_anterior', 'lectura_actual', 'diferencia_kwh', 
+                           'consumo_kwh']:
+                    try:
+                        # Limpiar formato de números (remover comas y convertir a float)
+                        valor_limpio = str(value).replace(',', '').replace('"', '')
+                        factura_limpia[key] = float(valor_limpio) if valor_limpio else None
+                    except:
+                        factura_limpia[key] = None
+                else:
+                    factura_limpia[key] = value.strip() if value else None
+            
+            facturas.append(factura_limpia)
+    
+    return facturas
+
+
+def generar_docx_factura(datos_factura: Dict[str, Any], ruta_salida: str = None) -> str:
+    """
+    Genera un archivo DOCX con la información de la factura.
+    
+    Args:
+        datos_factura: Datos de la factura
+        ruta_salida: Ruta donde guardar el DOCX
+        
+    Returns:
+        Ruta del archivo DOCX generado
+    """
+    try:
+        from docx import Document
+        from docx.shared import Inches, Pt
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        from docx.oxml.shared import OxmlElement, qn
+    except ImportError:
+        print("❌ Error: Se requiere python-docx. Instala con: pip install python-docx")
+        return None
+    
+    # Crear documento
+    doc = Document()
+    
+    # Configurar ruta de salida
+    if not ruta_salida:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        cliente_nombre = datos_factura.get('cliente_nombre', 'Cliente').replace(' ', '_')
+        ruta_salida = f"outputs/informe_factura_{cliente_nombre}_{timestamp}.docx"
+    
+    # Crear directorio si no existe
+    Path(ruta_salida).parent.mkdir(parents=True, exist_ok=True)
+    
+    # Título principal
+    title = doc.add_heading('INFORME DE FACTURA EMCALI', 0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    
+    # Información del cliente
+    doc.add_heading('INFORMACIÓN DEL CLIENTE', level=1)
+    
+    info_cliente = [
+        ('Nombre del Cliente', datos_factura.get('cliente_nombre', 'No disponible')),
+        ('Número de Contrato', datos_factura.get('contrato', 'No disponible')),
+        ('NIU', datos_factura.get('niu', 'No disponible')),
+        ('Dirección de Instalación', datos_factura.get('direccion_instalacion', 'No disponible')),
+        ('Operador de Red', datos_factura.get('operador_red', 'No disponible')),
+        ('Nivel de Tensión', datos_factura.get('nivel_tension', 'No disponible')),
+        ('Medidor', datos_factura.get('medidor', 'No disponible')),
+        ('Ciclo', datos_factura.get('ciclo', 'No disponible'))
+    ]
+    
+    for etiqueta, valor in info_cliente:
+        if valor and valor != 'No disponible':
+            p = doc.add_paragraph()
+            p.add_run(f'{etiqueta}: ').bold = True
+            p.add_run(str(valor))
+    
+    # Período de facturación
+    doc.add_heading('PERÍODO DE FACTURACIÓN', level=1)
+    
+    periodo_info = [
+        ('Fecha Desde', datos_factura.get('periodo_desde', 'No disponible')),
+        ('Fecha Hasta', datos_factura.get('periodo_hasta', 'No disponible')),
+        ('Días Facturados', datos_factura.get('dias_facturados', 'No disponible')),
+        ('Fecha de Expedición', datos_factura.get('fecha_expedicion', 'No disponible')),
+        ('Fecha de Vencimiento', datos_factura.get('fecha_vencimiento', 'No disponible'))
+    ]
+    
+    for etiqueta, valor in periodo_info:
+        if valor and valor != 'No disponible':
+            p = doc.add_paragraph()
+            p.add_run(f'{etiqueta}: ').bold = True
+            p.add_run(str(valor))
+    
+    # Lecturas y consumo
+    doc.add_heading('LECTURAS Y CONSUMO', level=1)
+    
+    lecturas_info = [
+        ('Lectura Anterior', datos_factura.get('lectura_anterior', 'No disponible')),
+        ('Lectura Actual', datos_factura.get('lectura_actual', 'No disponible')),
+        ('Diferencia kWh', datos_factura.get('diferencia_kwh', 'No disponible')),
+        ('Consumo kWh', datos_factura.get('consumo_kwh', 'No disponible'))
+    ]
+    
+    for etiqueta, valor in lecturas_info:
+        if valor and valor != 'No disponible':
+            p = doc.add_paragraph()
+            p.add_run(f'{etiqueta}: ').bold = True
+            p.add_run(str(valor))
+    
+    # Bloque ENERGÍA
+    doc.add_heading('BLOQUE ENERGÍA', level=1)
+    
+    energia_info = [
+        ('Energía kWh', datos_factura.get('energia_kwh', 'No disponible')),
+        ('Valor Unitario COP/kWh', datos_factura.get('energia_unitario_cop_kwh', 'No disponible')),
+        ('Valor Total Energía', datos_factura.get('energia_valor_total', 'No disponible')),
+        ('Total Bloque Energía', datos_factura.get('energia_total_bloque', 'No disponible'))
+    ]
+    
+    for etiqueta, valor in energia_info:
+        if valor and valor != 'No disponible':
+            p = doc.add_paragraph()
+            p.add_run(f'{etiqueta}: ').bold = True
+            if isinstance(valor, (int, float)):
+                p.add_run(f"${valor:,.2f} COP" if 'COP' in etiqueta else f"{valor:,.2f}")
+            else:
+                p.add_run(str(valor))
+    
+    # Otros servicios
+    doc.add_heading('OTROS SERVICIOS', level=1)
+    
+    otros_servicios = [
+        ('Aseo', datos_factura.get('aseo_total', 'No disponible')),
+        ('Alumbrado Público', datos_factura.get('alumbrado_publico_total', 'No disponible')),
+        ('Tasa Seguridad', datos_factura.get('tasa_seguridad_total', 'No disponible'))
+    ]
+    
+    for etiqueta, valor in otros_servicios:
+        if valor and valor != 'No disponible':
+            p = doc.add_paragraph()
+            p.add_run(f'{etiqueta}: ').bold = True
+            if isinstance(valor, (int, float)):
+                p.add_run(f"${valor:,.2f} COP")
+            else:
+                p.add_run(str(valor))
+    
+    # Totales
+    doc.add_heading('TOTALES', level=1)
+    
+    totales_info = [
+        ('Subtotal EMCALI', datos_factura.get('subtotal_emcali', 'No disponible')),
+        ('IVA', datos_factura.get('iva', 'No disponible')),
+        ('Total Operación Mes', datos_factura.get('total_operacion_mes', 'No disponible')),
+        ('Total a Pagar', datos_factura.get('total_a_pagar', 'No disponible')),
+        ('Moneda', datos_factura.get('moneda', 'No disponible'))
+    ]
+    
+    for etiqueta, valor in totales_info:
+        if valor and valor != 'No disponible':
+            p = doc.add_paragraph()
+            p.add_run(f'{etiqueta}: ').bold = True
+            if isinstance(valor, (int, float)) and 'Moneda' not in etiqueta:
+                p.add_run(f"${valor:,.2f} COP")
+            else:
+                p.add_run(str(valor))
+    
+    # Guardar documento
+    doc.save(ruta_salida)
+    print(f"✅ Documento DOCX generado: {ruta_salida}")
+    
+    return ruta_salida
+
+
+def analizar_factura_llm(datos_factura: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Analiza la factura usando LLM para generar insights y recomendaciones.
+    
+    Args:
+        datos_factura: Datos de la factura
+        
+    Returns:
+        Diccionario con el análisis del LLM
+    """
+    try:
+        # Formatear datos para el prompt
+        datos_formateados = []
+        for key, value in datos_factura.items():
+            if value is not None and value != "":
+                if isinstance(value, (int, float)):
+                    if 'total' in key.lower() or 'valor' in key.lower() or 'costo' in key.lower():
+                        datos_formateados.append(f"{key}: ${value:,.2f} COP")
+                    else:
+                        datos_formateados.append(f"{key}: {value:,.2f}")
+                else:
+                    datos_formateados.append(f"{key}: {value}")
+        
+        datos_texto = "\n".join(datos_formateados)
+        
+        # Llamar a OpenAI
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "user", "content": PROMPT_ANALISIS_EMCALI.format(datos_factura=datos_texto)}
+            ],
+            temperature=0.3,
+            max_tokens=3000
+        )
+        
+        # Extraer respuesta
+        analisis = response.choices[0].message.content.strip()
+        
+        # Guardar para debug
+        guardar_debug_analisis(datos_factura, analisis)
+        
+        return {
+            "exito": True,
+            "analisis": analisis,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        return {
+            "exito": False,
+            "error": f"Error en análisis LLM: {str(e)}",
+            "timestamp": datetime.now().isoformat()
+        }
+
+
+def guardar_debug_analisis(datos_factura: Dict[str, Any], analisis: str):
+    """
+    Guarda información de debug para el análisis.
+    
+    Args:
+        datos_factura: Datos de la factura
+        analisis: Análisis generado por el LLM
+    """
+    debug_dir = Path("outputs") / "debug"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Guardar análisis
+    with open(debug_dir / "analisis_llm.txt", "w", encoding="utf-8") as f:
+        f.write("=== ANÁLISIS LLM DE FACTURA EMCALI ===\n\n")
+        f.write(f"Fecha: {datetime.now()}\n")
+        f.write(f"Cliente: {datos_factura.get('cliente_nombre', 'N/A')}\n")
+        f.write(f"Contrato: {datos_factura.get('contrato', 'N/A')}\n")
+        f.write("="*50 + "\n\n")
+        f.write(analisis)
+    
+    # Guardar datos en JSON
+    with open(debug_dir / "datos_para_analisis.json", "w", encoding="utf-8") as f:
+        json.dump({
+            "datos_factura": datos_factura,
+            "timestamp": datetime.now().isoformat()
+        }, f, ensure_ascii=False, indent=2)
+
+
+def procesar_factura_completa(ruta_csv: str = "outputs/facturas_emcali.csv", 
+                            generar_docx: bool = True, 
+                            hacer_analisis: bool = True) -> Dict[str, Any]:
+    """
+    Procesa completamente una factura: lee CSV, genera DOCX y hace análisis LLM.
+    
+    Args:
+        ruta_csv: Ruta al archivo CSV
+        generar_docx: Si generar archivo DOCX
+        hacer_analisis: Si hacer análisis con LLM
+        
+    Returns:
+        Diccionario con resultados del procesamiento
+    """
+    try:
+        print("🔍 Procesando factura completa...")
+        
+        # Leer datos del CSV
+        print("📄 Leyendo datos del CSV...")
+        facturas = leer_csv_emcali(ruta_csv)
+        
+        if not facturas:
+            return {"error": "No se encontraron datos en el CSV"}
+        
+        factura = facturas[0]  # Tomar la primera factura
+        resultados = {
+            "exito": True,
+            "factura_procesada": factura.get('cliente_nombre', 'N/A'),
+            "archivos_generados": []
+        }
+        
+        # Generar DOCX
+        if generar_docx:
+            print("📝 Generando archivo DOCX...")
+            ruta_docx = generar_docx_factura(factura)
+            if ruta_docx:
+                resultados["archivos_generados"].append(ruta_docx)
+        
+        # Hacer análisis LLM
+        if hacer_analisis:
+            print("🤖 Generando análisis con LLM...")
+            analisis_resultado = analizar_factura_llm(factura)
+            resultados["analisis_llm"] = analisis_resultado
+            
+            if analisis_resultado["exito"]:
+                # Guardar análisis en archivo separado
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                cliente_nombre = factura.get('cliente_nombre', 'Cliente').replace(' ', '_')
+                ruta_analisis = f"outputs/analisis_factura_{cliente_nombre}_{timestamp}.txt"
+                
+                with open(ruta_analisis, "w", encoding="utf-8") as f:
+                    f.write("ANÁLISIS DE FACTURA EMCALI\n")
+                    f.write("="*50 + "\n\n")
+                    f.write(analisis_resultado["analisis"])
+                
+                resultados["archivos_generados"].append(ruta_analisis)
+                print(f"✅ Análisis guardado: {ruta_analisis}")
+        
+        print("✅ Procesamiento completo finalizado")
+        return resultados
+        
+    except Exception as e:
+        return {"error": f"Error en procesamiento completo: {str(e)}"}
+
+
+def agregar_analisis_a_docx(ruta_docx: str, analisis: str) -> str:
+    """
+    Agrega el análisis LLM a un documento DOCX existente.
+    
+    Args:
+        ruta_docx: Ruta al archivo DOCX
+        analisis: Análisis generado por el LLM
+        
+    Returns:
+        Ruta del archivo DOCX actualizado
+    """
+    try:
+        from docx import Document
+        from docx.shared import Inches
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        
+        # Abrir documento existente
+        doc = Document(ruta_docx)
+        
+        # Agregar página nueva
+        doc.add_page_break()
+        
+        # Título del análisis
+        title = doc.add_heading('ANÁLISIS INTELIGENTE DE LA FACTURA', 0)
+        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
+        # Agregar análisis
+        doc.add_paragraph(analisis)
+        
+        # Guardar documento actualizado
+        ruta_actualizada = ruta_docx.replace('.docx', '_con_analisis.docx')
+        doc.save(ruta_actualizada)
+        
+        print(f"✅ Análisis agregado al DOCX: {ruta_actualizada}")
+        return ruta_actualizada
+        
+    except Exception as e:
+        print(f"❌ Error agregando análisis al DOCX: {e}")
+        return ruta_docx
+
+
+def analizar_factura_tecnico_electrico(datos_factura: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Analiza la factura como ingeniero eléctrico experto usando OpenAI.
+    
+    Args:
+        datos_factura: Datos de la factura
+        
+    Returns:
+        Diccionario con el análisis técnico del LLM
+    """
+    try:
+        # Formatear datos para el prompt técnico
+        datos_formateados = []
+        for key, value in datos_factura.items():
+            if value is not None and value != "":
+                if isinstance(value, (int, float)):
+                    if 'total' in key.lower() or 'valor' in key.lower() or 'costo' in key.lower():
+                        datos_formateados.append(f"{key}: ${value:,.2f} COP")
+                    else:
+                        datos_formateados.append(f"{key}: {value:,.2f}")
+                else:
+                    datos_formateados.append(f"{key}: {value}")
+        
+        datos_texto = "\n".join(datos_formateados)
+        
+        # Llamar a OpenAI con el prompt técnico
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "user", "content": PROMPT_ANALISIS_TECNICO_ELECTRICO.format(datos_factura=datos_texto)}
+            ],
+            temperature=0.2,  # Más bajo para análisis técnico más preciso
+            max_tokens=4000   # Más tokens para análisis técnico detallado
+        )
+        
+        # Extraer respuesta
+        analisis_tecnico = response.choices[0].message.content.strip()
+        
+        # Guardar para debug
+        guardar_debug_analisis_tecnico(datos_factura, analisis_tecnico)
+        
+        return {
+            "exito": True,
+            "analisis_tecnico": analisis_tecnico,
+            "timestamp": datetime.now().isoformat(),
+            "tipo": "analisis_tecnico_electrico"
+        }
+        
+    except Exception as e:
+        return {
+            "exito": False,
+            "error": f"Error en análisis técnico eléctrico: {str(e)}",
+            "timestamp": datetime.now().isoformat()
+        }
+
+
+def guardar_debug_analisis_tecnico(datos_factura: Dict[str, Any], analisis_tecnico: str):
+    """
+    Guarda información de debug para el análisis técnico.
+    
+    Args:
+        datos_factura: Datos de la factura
+        analisis_tecnico: Análisis técnico generado por el LLM
+    """
+    debug_dir = Path("outputs") / "debug"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Guardar análisis técnico
+    with open(debug_dir / "analisis_tecnico_electrico.txt", "w", encoding="utf-8") as f:
+        f.write("=== ANÁLISIS TÉCNICO ELÉCTRICO DE FACTURA EMCALI ===\n\n")
+        f.write(f"Fecha: {datetime.now()}\n")
+        f.write(f"Cliente: {datos_factura.get('cliente_nombre', 'N/A')}\n")
+        f.write(f"Contrato: {datos_factura.get('contrato', 'N/A')}\n")
+        f.write(f"Tipo: Análisis Técnico de Ingeniero Eléctrico\n")
+        f.write("="*60 + "\n\n")
+        f.write(analisis_tecnico)
+    
+    # Guardar datos en JSON
+    with open(debug_dir / "datos_para_analisis_tecnico.json", "w", encoding="utf-8") as f:
+        json.dump({
+            "datos_factura": datos_factura,
+            "timestamp": datetime.now().isoformat(),
+            "tipo_analisis": "tecnico_electrico"
+        }, f, ensure_ascii=False, indent=2)
+
+
+def procesar_factura_con_analisis_tecnico(ruta_csv: str = "outputs/facturas_emcali.csv", 
+                                        generar_docx: bool = True, 
+                                        hacer_analisis_tecnico: bool = True) -> Dict[str, Any]:
+    """
+    Procesa una factura con análisis técnico de ingeniero eléctrico.
+    
+    Args:
+        ruta_csv: Ruta al archivo CSV
+        generar_docx: Si generar archivo DOCX
+        hacer_analisis_tecnico: Si hacer análisis técnico eléctrico
+        
+    Returns:
+        Diccionario con resultados del procesamiento
+    """
+    try:
+        print("🔍 Procesando factura con análisis técnico eléctrico...")
+        
+        # Leer datos del CSV
+        print("📄 Leyendo datos del CSV...")
+        facturas = leer_csv_emcali(ruta_csv)
+        
+        if not facturas:
+            return {"error": "No se encontraron datos en el CSV"}
+        
+        factura = facturas[0]  # Tomar la primera factura
+        resultados = {
+            "exito": True,
+            "factura_procesada": factura.get('cliente_nombre', 'N/A'),
+            "archivos_generados": []
+        }
+        
+        # Generar DOCX
+        if generar_docx:
+            print("📝 Generando archivo DOCX...")
+            ruta_docx = generar_docx_factura(factura)
+            if ruta_docx:
+                resultados["archivos_generados"].append(ruta_docx)
+        
+        # Hacer análisis técnico eléctrico
+        if hacer_analisis_tecnico:
+            print("⚡ Generando análisis técnico de ingeniero eléctrico...")
+            analisis_resultado = analizar_factura_tecnico_electrico(factura)
+            resultados["analisis_tecnico"] = analisis_resultado
+            
+            if analisis_resultado["exito"]:
+                # Guardar análisis técnico en archivo separado
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                cliente_nombre = factura.get('cliente_nombre', 'Cliente').replace(' ', '_')
+                ruta_analisis_tecnico = f"outputs/informe_tecnico_electrico_{cliente_nombre}_{timestamp}.txt"
+                
+                with open(ruta_analisis_tecnico, "w", encoding="utf-8") as f:
+                    f.write("INFORME TÉCNICO ELÉCTRICO - FACTURA EMCALI\n")
+                    f.write("="*60 + "\n\n")
+                    f.write("ANÁLISIS REALIZADO POR: Ingeniero Eléctrico Experto en Energía\n")
+                    f.write(f"FECHA: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"CLIENTE: {factura.get('cliente_nombre', 'N/A')}\n")
+                    f.write(f"CONTRATO: {factura.get('contrato', 'N/A')}\n")
+                    f.write("="*60 + "\n\n")
+                    f.write(analisis_resultado["analisis_tecnico"])
+                
+                resultados["archivos_generados"].append(ruta_analisis_tecnico)
+                print(f"✅ Análisis técnico guardado: {ruta_analisis_tecnico}")
+        
+        print("✅ Procesamiento con análisis técnico finalizado")
+        return resultados
+        
+    except Exception as e:
+        return {"error": f"Error en procesamiento con análisis técnico: {str(e)}"}
+
+
+def agregar_analisis_tecnico_a_docx(ruta_docx: str, analisis_tecnico: str) -> str:
+    """
+    Agrega el análisis técnico eléctrico a un documento DOCX existente.
+    
+    Args:
+        ruta_docx: Ruta al archivo DOCX
+        analisis_tecnico: Análisis técnico generado por el LLM
+        
+    Returns:
+        Ruta del archivo DOCX actualizado
+    """
+    try:
+        from docx import Document
+        from docx.shared import Inches
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        
+        # Abrir documento existente
+        doc = Document(ruta_docx)
+        
+        # Agregar página nueva
+        doc.add_page_break()
+        
+        # Título del análisis técnico
+        title = doc.add_heading('INFORME TÉCNICO ELÉCTRICO', 0)
+        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
+        # Subtítulo
+        subtitle = doc.add_heading('Análisis de Ingeniero Eléctrico Experto en Energía', level=1)
+        subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
+        # Agregar análisis técnico
+        doc.add_paragraph(analisis_tecnico)
+        
+        # Guardar documento actualizado
+        ruta_actualizada = ruta_docx.replace('.docx', '_con_analisis_tecnico.docx')
+        doc.save(ruta_actualizada)
+        
+        print(f"✅ Análisis técnico agregado al DOCX: {ruta_actualizada}")
+        return ruta_actualizada
+        
+    except Exception as e:
+        print(f"❌ Error agregando análisis técnico al DOCX: {e}")
+        return ruta_docx
+
+
+def generar_docx_factura_mejorada(canonica: Dict[str, Any], flags: List[str], confidence: float, balance_ok: bool, delta: float, pdf_hash: str) -> str:
+    """
+    Genera DOCX mejorado con story, reconciliación y metadatos completos.
+    
+    Args:
+        canonica: Datos canónicos de la factura
+        flags: Flags de calidad
+        confidence: Score de confianza
+        balance_ok: Si el balance está correcto
+        delta: Diferencia en el balance
+        pdf_hash: Hash del PDF
+        
+    Returns:
+        Ruta del archivo DOCX generado
+    """
+    try:
+        from docx import Document
+        from docx.shared import Inches, Pt
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        from docx.enum.style import WD_STYLE_TYPE
+        from docx.oxml.shared import OxmlElement, qn
+        
+        # Crear documento
+        doc = Document()
+        
+        # Configurar estilos
+        styles = doc.styles
+        style = styles['Normal']
+        font = style.font
+        font.name = 'Calibri'
+        font.size = Pt(11)
+        
+        # Título principal
+        title = doc.add_heading('INFORME DETALLADO DE FACTURA EMCALI', 0)
+        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
+        # Metadatos del documento
+        doc.add_paragraph(f"📅 Generado el: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        doc.add_paragraph(f"🔍 PDF Hash: {pdf_hash}")
+        doc.add_paragraph(f"📊 Score de Confianza: {confidence:.1%}")
+        
+        # Alertas si hay flags
+        if flags:
+            doc.add_heading('⚠️ ALERTAS DE CALIDAD', level=1)
+            for flag in flags:
+                doc.add_paragraph(f"• {flag}", style='List Bullet')
+        
+        # 1. RESUMEN EJECUTIVO
+        doc.add_heading('1. RESUMEN EJECUTIVO', level=1)
+        
+        metadatos = canonica.get('metadatos', {})
+        doc.add_paragraph(f"🏢 Contrato: {metadatos.get('contrato', 'N/A')}")
+        doc.add_paragraph(f"🆔 NIC: {metadatos.get('nic', 'N/A')}")
+        doc.add_paragraph(f"🔐 CUDE: {metadatos.get('cude', 'N/A')}")
+        doc.add_paragraph(f"💳 No. Pago Electrónico: {metadatos.get('no_pago_electronico', 'N/A')}")
+        doc.add_paragraph(f"📅 Período: {canonica.get('periodo_inicio', 'N/A')} a {canonica.get('periodo_fin', 'N/A')}")
+        doc.add_paragraph(f"📆 Días Facturados: {canonica.get('dias_facturados', 'N/A')}")
+        doc.add_paragraph(f"💰 Total a Pagar: ${canonica.get('total_pagar_cop', 0):,.2f} COP")
+        
+        # 2. ANÁLISIS DE ENERGÍA ELÉCTRICA
+        doc.add_heading('2. ANÁLISIS DE ENERGÍA ELÉCTRICA', level=1)
+        
+        energia = canonica.get('energia', {})
+        if energia:
+            doc.add_paragraph(f"📊 Lectura Inicial: {energia.get('lectura_inicial', 'N/A'):,.0f} kWh")
+            doc.add_paragraph(f"📊 Lectura Final: {energia.get('lectura_final', 'N/A'):,.0f} kWh")
+            doc.add_paragraph(f"⚡ Consumo del Período: {energia.get('consumo_kwh', 'N/A'):,.0f} kWh")
+            doc.add_paragraph(f"💵 Tarifa Unitaria: ${energia.get('cuv_cop_kwh', 0):,.2f} COP/kWh")
+            
+            # Consumo diario promedio
+            dias = canonica.get('dias_facturados', 30)
+            consumo_diario = energia.get('consumo_kwh', 0) / dias if dias > 0 else 0
+            doc.add_paragraph(f"📈 Consumo Diario Promedio: {consumo_diario:.1f} kWh/día")
+            
+            # Base vs Total
+            base_cop = energia.get('base_cop', 0)
+            total_cop = energia.get('total_cop', 0)
+            doc.add_paragraph(f"💵 Base: ${base_cop:,.2f} COP")
+            doc.add_paragraph(f"💵 Total: ${total_cop:,.2f} COP")
+            
+            if base_cop and total_cop and base_cop != total_cop:
+                diferencia = total_cop - base_cop
+                doc.add_paragraph(f"📊 Diferencia (Total - Base): ${diferencia:,.2f} COP", style='Intense Quote')
+        
+        # 3. SERVICIOS DE ACUEDUCTO Y ALCANTARILLADO
+        doc.add_heading('3. SERVICIOS DE ACUEDUCTO Y ALCANTARILLADO', level=1)
+        
+        # Acueducto
+        acueducto = canonica.get('acueducto', {})
+        if acueducto:
+            doc.add_heading('💧 Acueducto', level=2)
+            doc.add_paragraph(f"📊 Consumo: {acueducto.get('consumo_m3', 'N/A'):,.0f} m³")
+            doc.add_paragraph(f"💵 Tarifa: ${acueducto.get('tarifa_cop_m3', 0):,.2f} COP/m³")
+            doc.add_paragraph(f"💰 Total: ${acueducto.get('total_cop', 0):,.2f} COP")
+            
+            # Consumo diario promedio
+            consumo_diario_agua = acueducto.get('consumo_m3', 0) / dias if dias > 0 else 0
+            doc.add_paragraph(f"📈 Consumo Diario Promedio: {consumo_diario_agua:.1f} m³/día")
+        
+        # Alcantarillado
+        alcantarillado = canonica.get('alcantarillado', {})
+        if alcantarillado:
+            doc.add_heading('🚰 Alcantarillado', level=2)
+            doc.add_paragraph(f"📊 Consumo: {alcantarillado.get('consumo_m3', 'N/A'):,.0f} m³")
+            doc.add_paragraph(f"💵 Tarifa: ${alcantarillado.get('tarifa_cop_m3', 0):,.2f} COP/m³")
+            doc.add_paragraph(f"💰 Total: ${alcantarillado.get('total_cop', 0):,.2f} COP")
+        
+        # 4. SERVICIOS COMPLEMENTARIOS
+        doc.add_heading('4. SERVICIOS COMPLEMENTARIOS', level=1)
+        
+        # Aseo
+        aseo = canonica.get('aseo', {})
+        if aseo:
+            doc.add_paragraph(f"🗑️ Aseo: ${aseo.get('total_cop', 0):,.2f} COP")
+        
+        # Alumbrado Público
+        alumbrado = canonica.get('alumbrado_publico', {})
+        if alumbrado:
+            doc.add_paragraph(f"💡 Alumbrado Público: ${alumbrado.get('total_cop', 0):,.2f} COP")
+        
+        # Tasa de Seguridad
+        tasa_seguridad = canonica.get('tasa_seguridad', {})
+        if tasa_seguridad:
+            doc.add_paragraph(f"🛡️ Tasa de Seguridad: ${tasa_seguridad.get('total_cop', 0):,.2f} COP")
+        
+        # 5. IMPUESTOS Y TOTALES
+        doc.add_heading('5. IMPUESTOS Y TOTALES', level=1)
+        
+        iva = canonica.get('iva_total_cop', 0)
+        doc.add_paragraph(f"🏛️ IVA: ${iva:,.2f} COP")
+        
+        total_pagar = canonica.get('total_pagar_cop', 0)
+        doc.add_paragraph(f"💰 Total a Pagar: ${total_pagar:,.2f} COP", style='Intense Quote')
+        
+        # 6. ANÁLISIS COMPARATIVO
+        doc.add_heading('6. ANÁLISIS COMPARATIVO', level=1)
+        
+        # Comparación con último pago
+        ultimo_pago = metadatos.get('ultimo_pago_valor', 0)
+        if ultimo_pago and ultimo_pago > 0:
+            diferencia_pago = total_pagar - ultimo_pago
+            porcentaje_cambio = (diferencia_pago / ultimo_pago) * 100 if ultimo_pago > 0 else 0
+            
+            doc.add_paragraph(f"📊 Último Pago: ${ultimo_pago:,.2f} COP")
+            doc.add_paragraph(f"📊 Pago Actual: ${total_pagar:,.2f} COP")
+            doc.add_paragraph(f"📈 Diferencia: ${diferencia_pago:,.2f} COP")
+            doc.add_paragraph(f"📊 Cambio Porcentual: {porcentaje_cambio:+.1f}%")
+            
+            if porcentaje_cambio > 10:
+                doc.add_paragraph("⚠️ INCREMENTO SIGNIFICATIVO DETECTADO", style='Intense Quote')
+            elif porcentaje_cambio < -10:
+                doc.add_paragraph("✅ REDUCCIÓN SIGNIFICATIVA DETECTADA", style='Intense Quote')
+        
+        # 7. RECONCILIACIÓN DE TOTALES
+        doc.add_heading('7. RECONCILIACIÓN DE TOTALES', level=1)
+        
+        # Calcular suma de componentes
+        suma_componentes = 0.0
+        
+        if energia:
+            suma_componentes += energia.get('total_cop', 0)
+        if acueducto:
+            suma_componentes += acueducto.get('total_cop', 0)
+        if alcantarillado:
+            suma_componentes += alcantarillado.get('total_cop', 0)
+        if aseo:
+            suma_componentes += aseo.get('total_cop', 0)
+        if alumbrado:
+            suma_componentes += alumbrado.get('total_cop', 0)
+        if tasa_seguridad:
+            suma_componentes += tasa_seguridad.get('total_cop', 0)
+        
+        # Otros servicios
+        otros = canonica.get('otros', {})
+        if otros:
+            suma_componentes += otros.get('total_cop', 0)
+        
+        # IVA
+        suma_componentes += iva
+        
+        doc.add_paragraph(f"📊 Suma de Componentes: ${suma_componentes:,.2f} COP")
+        doc.add_paragraph(f"📊 Total Declarado: ${total_pagar:,.2f} COP")
+        doc.add_paragraph(f"📊 Diferencia: ${delta:,.2f} COP")
+        
+        # Semáforo de reconciliación
+        if balance_ok:
+            doc.add_paragraph("✅ RECONCILIACIÓN: CORRECTA", style='Intense Quote')
+        else:
+            doc.add_paragraph("⚠️ RECONCILIACIÓN: REQUIERE REVISIÓN", style='Intense Quote')
+        
+        # 8. RECOMENDACIONES
+        doc.add_heading('8. RECOMENDACIONES', level=1)
+        
+        # Recomendaciones basadas en el consumo
+        if energia:
+            consumo_kwh = energia.get('consumo_kwh', 0)
+            if consumo_kwh > 1000:
+                doc.add_paragraph("💡 Consumo de energía alto. Considere implementar medidas de eficiencia energética.", style='List Bullet')
+            elif consumo_kwh < 300:
+                doc.add_paragraph("✅ Consumo de energía bajo. Buen trabajo en eficiencia energética.", style='List Bullet')
+        
+        if acueducto:
+            consumo_agua = acueducto.get('consumo_m3', 0)
+            if consumo_agua > 50:
+                doc.add_paragraph("💧 Consumo de agua alto. Revise posibles fugas o implemente medidas de ahorro.", style='List Bullet')
+        
+        doc.add_paragraph("📊 Monitoree regularmente su consumo para identificar tendencias.", style='List Bullet')
+        doc.add_paragraph("💰 Compare con períodos anteriores para detectar anomalías.", style='List Bullet')
+        
+        # 9. ANÁLISIS TÉCNICO PROFESIONAL
+        doc.add_heading('9. ANÁLISIS TÉCNICO PROFESIONAL', level=1)
+        doc.add_paragraph("🔬 Análisis realizado por: Ingeniero Eléctrico Especialista en Energía Eficiente")
+        
+        # Caracterización técnica del consumo
+        if energia:
+            consumo_kwh = energia.get('consumo_kwh', 0)
+            dias = canonica.get('dias_facturados', 30)
+            consumo_diario = consumo_kwh / dias if dias > 0 else 0
+            potencia_promedio = consumo_diario / 24  # kW promedio
+            
+            doc.add_heading('Caracterización Técnica del Consumo', level=2)
+            doc.add_paragraph(f"⚡ Potencia Promedio: {potencia_promedio:.2f} kW")
+            doc.add_paragraph(f"📊 Consumo Diario: {consumo_diario:.1f} kWh/día")
+            doc.add_paragraph(f"📈 Factor de Carga Estimado: {potencia_promedio/10:.2f} (normal: 0.2-0.4)")
+            
+            # Diagnóstico técnico
+            doc.add_heading('Diagnóstico Técnico', level=2)
+            
+            if consumo_diario > 200:
+                doc.add_paragraph("🔴 CONSUMO CRÍTICAMENTE ALTO", style='Intense Quote')
+                doc.add_paragraph("• Equivalente a 10+ aires acondicionados de 1 tonelada", style='List Bullet')
+                doc.add_paragraph("• Requiere auditoría energética inmediata", style='List Bullet')
+                doc.add_paragraph("• Potencial de ahorro: 40-60% del consumo", style='List Bullet')
+            elif consumo_diario > 100:
+                doc.add_paragraph("⚠️ CONSUMO ELEVADO", style='Intense Quote')
+                doc.add_paragraph("• Consumo superior al promedio residencial", style='List Bullet')
+                doc.add_paragraph("• Oportunidad de optimización significativa", style='List Bullet')
+                doc.add_paragraph("• Potencial de ahorro: 20-40% del consumo", style='List Bullet')
+            elif consumo_diario > 50:
+                doc.add_paragraph("🟡 CONSUMO MODERADO", style='Intense Quote')
+                doc.add_paragraph("• Consumo dentro de rangos aceptables", style='List Bullet')
+                doc.add_paragraph("• Optimización recomendada", style='List Bullet')
+                doc.add_paragraph("• Potencial de ahorro: 10-20% del consumo", style='List Bullet')
+            else:
+                doc.add_paragraph("✅ CONSUMO EFICIENTE", style='Intense Quote')
+                doc.add_paragraph("• Excelente gestión energética", style='List Bullet')
+                doc.add_paragraph("• Mantener buenas prácticas", style='List Bullet')
+                doc.add_paragraph("• Potencial de ahorro: 5-10% del consumo", style='List Bullet')
+        
+        # Análisis económico técnico
+        doc.add_heading('Análisis Económico Técnico', level=2)
+        
+        if energia:
+            tarifa_kwh = energia.get('cuv_cop_kwh', 0)
+            costo_energia = energia.get('total_cop', 0)
+            total_factura = canonica.get('total_pagar_cop', 0)
+            porcentaje_energia = (costo_energia / total_factura * 100) if total_factura > 0 else 0
+            
+            doc.add_paragraph(f"💵 Tarifa Unitaria: ${tarifa_kwh:,.2f} COP/kWh")
+            doc.add_paragraph(f"💰 Costo Total Energía: ${costo_energia:,.2f} COP")
+            doc.add_paragraph(f"📊 Porcentaje Energía: {porcentaje_energia:.1f}% del total")
+            
+            if porcentaje_energia > 80:
+                doc.add_paragraph("🔴 ALTA DEPENDENCIA ENERGÉTICA", style='Intense Quote')
+                doc.add_paragraph("• La energía representa más del 80% del costo total", style='List Bullet')
+                doc.add_paragraph("• Vulnerable a incrementos tarifarios", style='List Bullet')
+                doc.add_paragraph("• Urgente implementar medidas de eficiencia", style='List Bullet')
+            elif porcentaje_energia > 60:
+                doc.add_paragraph("⚠️ DEPENDENCIA ENERGÉTICA MODERADA", style='Intense Quote')
+                doc.add_paragraph("• La energía representa más del 60% del costo total", style='List Bullet')
+                doc.add_paragraph("• Recomendable optimizar consumo", style='List Bullet')
+            else:
+                doc.add_paragraph("✅ DISTRIBUCIÓN EQUILIBRADA", style='Intense Quote')
+                doc.add_paragraph("• Buena distribución de costos entre servicios", style='List Bullet')
+        
+        # Recomendaciones técnicas específicas
+        doc.add_heading('Recomendaciones Técnicas Específicas', level=2)
+        
+        if energia:
+            consumo_kwh = energia.get('consumo_kwh', 0)
+            
+            if consumo_kwh > 5000:
+                doc.add_paragraph("🔴 MEDIDAS URGENTES (Alto Consumo):", style='Intense Quote')
+                doc.add_paragraph("• Auditoría energética profesional", style='List Bullet')
+                doc.add_paragraph("• Sistema de gestión energética (EMS)", style='List Bullet')
+                doc.add_paragraph("• Análisis de curvas de carga", style='List Bullet')
+                doc.add_paragraph("• Optimización de sistemas HVAC", style='List Bullet')
+                doc.add_paragraph("• Sistema solar fotovoltaico 20-50 kWp", style='List Bullet')
+                
+            elif consumo_kwh > 2000:
+                doc.add_paragraph("⚠️ MEDIDAS RECOMENDADAS (Consumo Elevado):", style='Intense Quote')
+                doc.add_paragraph("• Iluminación LED completa", style='List Bullet')
+                doc.add_paragraph("• Termostatos inteligentes", style='List Bullet')
+                doc.add_paragraph("• Electrodomésticos eficientes A+++", style='List Bullet')
+                doc.add_paragraph("• Sistema solar fotovoltaico 5-10 kWp", style='List Bullet')
+                doc.add_paragraph("• Aislamiento térmico", style='List Bullet')
+                
+            else:
+                doc.add_paragraph("✅ MEDIDAS DE OPTIMIZACIÓN (Consumo Moderado):", style='Intense Quote')
+                doc.add_paragraph("• Reemplazo de luminarias por LED", style='List Bullet')
+                doc.add_paragraph("• Programación de equipos", style='List Bullet')
+                doc.add_paragraph("• Mantenimiento preventivo", style='List Bullet')
+                doc.add_paragraph("• Sistema solar fotovoltaico 3-5 kWp", style='List Bullet')
+        
+        # Proyecciones financieras
+        doc.add_heading('Proyecciones Financieras', level=2)
+        
+        if energia:
+            consumo_kwh = energia.get('consumo_kwh', 0)
+            costo_energia = energia.get('total_cop', 0)
+            
+            if consumo_kwh > 5000:
+                ahorro_estimado = costo_energia * 0.5  # 50% de ahorro
+                doc.add_paragraph(f"💰 Ahorro Potencial Anual: ${ahorro_estimado * 12:,.0f} COP", style='Intense Quote')
+                doc.add_paragraph("• ROI estimado: 3-4 años", style='List Bullet')
+                doc.add_paragraph("• Inversión requerida: $80-200 millones COP", style='List Bullet')
+                
+            elif consumo_kwh > 2000:
+                ahorro_estimado = costo_energia * 0.3  # 30% de ahorro
+                doc.add_paragraph(f"💰 Ahorro Potencial Anual: ${ahorro_estimado * 12:,.0f} COP", style='Intense Quote')
+                doc.add_paragraph("• ROI estimado: 2-3 años", style='List Bullet')
+                doc.add_paragraph("• Inversión requerida: $20-50 millones COP", style='List Bullet')
+                
+            else:
+                ahorro_estimado = costo_energia * 0.15  # 15% de ahorro
+                doc.add_paragraph(f"💰 Ahorro Potencial Anual: ${ahorro_estimado * 12:,.0f} COP", style='Intense Quote')
+                doc.add_paragraph("• ROI estimado: 1-2 años", style='List Bullet')
+                doc.add_paragraph("• Inversión requerida: $5-15 millones COP", style='List Bullet')
+        
+        # 10. METADATOS TÉCNICOS
+        doc.add_heading('10. METADATOS TÉCNICOS', level=1)
+        
+        doc.add_paragraph(f"🔍 PDF Hash: {pdf_hash}")
+        doc.add_paragraph(f"📅 Procesado: {metadatos.get('processed_at', 'N/A')}")
+        doc.add_paragraph(f"📋 Schema Version: {metadatos.get('schema_version', 'N/A')}")
+        doc.add_paragraph(f"🤖 Prompt Version: {metadatos.get('prompt_version', 'N/A')}")
+        doc.add_paragraph(f"📊 Confidence Score: {confidence:.1%}")
+        doc.add_paragraph(f"📅 Último Pago: {metadatos.get('ultimo_pago_fecha', 'N/A')}")
+        doc.add_paragraph(f"💰 Valor Último Pago: ${metadatos.get('ultimo_pago_valor', 0):,.2f} COP")
+        
+        # 10. OTROS CONCEPTOS
+        if otros and otros.get('items'):
+            doc.add_heading('10. OTROS CONCEPTOS', level=1)
+            for item in otros['items']:
+                doc.add_paragraph(f"• {item.get('label', 'N/A')}: ${item.get('total_cop', 0):,.2f} COP", style='List Bullet')
+        
+        # Guardar documento
+        nombre_cliente = metadatos.get('contrato', 'Cliente')
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        nombre_archivo = f"informe_factura_{nombre_cliente}_{timestamp}.docx"
+        ruta_archivo = Path("outputs") / nombre_archivo
+        
+        doc.save(str(ruta_archivo))
+        print(f"✅ DOCX mejorado generado: {ruta_archivo}")
+        
+        return str(ruta_archivo)
+        
+    except Exception as e:
+        print(f"❌ Error generando DOCX mejorado: {e}")
+        return ""
