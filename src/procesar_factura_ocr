@@ -1,0 +1,347 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+procesar_factura_ocr.py — Procesador de facturas usando extractor OCR genérico
+"""
+
+import sys
+import os
+import json
+import csv
+import hashlib
+from pathlib import Path
+from datetime import datetime
+from typing import Dict, List, Any, Optional, Tuple
+
+# Agregar el directorio src al path
+sys.path.insert(0, str(Path(__file__).parent))
+
+from extractor_ocr import extraer_factura_emcali
+from utils import ensure_dirs
+
+def listar_facturas(directorio: str = "data") -> List[Path]:
+    """Lista todas las facturas PDF en el directorio especificado."""
+    facturas = list(Path(directorio).glob("*.pdf"))
+    return facturas
+
+def obtener_facturas_procesadas(csv_path: str = "outputs/maestro.csv") -> set:
+    """Obtiene las facturas ya procesadas desde el CSV usando pdf_sha1."""
+    facturas_procesadas = set()
+    
+    csv_file = Path(csv_path)
+    if csv_file.exists():
+        try:
+            with open(csv_file, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if row.get('pdf_sha1'):
+                        facturas_procesadas.add(row['pdf_sha1'])
+        except Exception as e:
+            print(f"⚠️ Error leyendo CSV: {e}")
+    
+    return facturas_procesadas
+
+def procesar_factura_ocr(factura_path: Path, force_ocr: bool = False, strict: bool = False) -> Dict[str, Any]:
+    """
+    Procesa una factura usando el extractor OCR genérico.
+    
+    Args:
+        factura_path: Ruta al archivo PDF
+        force_ocr: Si forzar OCR
+        strict: Si fallar en validaciones críticas
+        
+    Returns:
+        Diccionario con resultados del procesamiento
+    """
+    resultado = {
+        "success": False,
+        "pdf_sha1": "",
+        "source_path": str(factura_path),
+        "processed_at": datetime.now().isoformat(),
+        "errors": [],
+        "warnings": [],
+        "duracion_segundos": 0
+    }
+    
+    inicio = datetime.now()
+    
+    try:
+        print(f"\n🚀 Procesando: {factura_path.name}")
+        print("=" * 60)
+        
+        # Paso 1: Extraer datos con OCR
+        print("🔍 Extrayendo datos con OCR...")
+        datos_extraidos = extraer_factura_emcali(str(factura_path), force_ocr)
+        
+        if "error" in datos_extraidos:
+            resultado["errors"].append(f"Error en extracción: {datos_extraidos['error']}")
+            return resultado
+        
+        # Paso 2: Calcular hash del PDF
+        pdf_sha1 = hashlib.sha1(factura_path.read_bytes()).hexdigest()
+        resultado["pdf_sha1"] = pdf_sha1
+        datos_extraidos["pdf_sha1"] = pdf_sha1
+        
+        print(f"✅ Hash: {pdf_sha1[:16]}...")
+        
+        # Paso 3: Validar datos extraídos
+        print("✅ Validando datos...")
+        es_valido, errores = validar_extraccion_ocr(datos_extraidos, strict)
+        
+        if not es_valido:
+            resultado["errors"].extend(errores)
+            if strict:
+                return resultado
+            else:
+                resultado["warnings"].extend(errores)
+        
+        # Paso 4: Guardar archivos
+        print("💾 Guardando archivos...")
+        guardar_archivos_ocr(datos_extraidos, factura_path)
+        
+        # Paso 5: Actualizar CSV maestro
+        print("📊 Actualizando CSV maestro...")
+        actualizar_csv_maestro(datos_extraidos)
+        
+        resultado["success"] = True
+        resultado["datos_extraidos"] = datos_extraidos
+        print("✅ Procesamiento completado exitosamente")
+        
+    except Exception as e:
+        resultado["errors"].append(f"Error inesperado: {e}")
+        print(f"❌ Error: {e}")
+    
+    finally:
+        fin = datetime.now()
+        resultado["duracion_segundos"] = (fin - inicio).total_seconds()
+    
+    return resultado
+
+def validar_extraccion_ocr(datos: Dict[str, Any], strict: bool = False) -> Tuple[bool, List[str]]:
+    """
+    Valida la extracción OCR según criterios definidos.
+    
+    Args:
+        datos: Datos extraídos
+        strict: Si fallar en validaciones críticas
+        
+    Returns:
+        Tupla con (es_valido, lista_errores)
+    """
+    errores = []
+    
+    # Validar campos obligatorios
+    campos_obligatorios = ["contrato", "total_pagar_cop"]
+    for campo in campos_obligatorios:
+        if not datos.get(campo):
+            errores.append(f"Campo obligatorio '{campo}' no encontrado")
+    
+    # Validar al menos un campo de período
+    campos_periodo = ["periodo_inicio", "periodo_fin", "mes_cuenta"]
+    tiene_periodo = any(datos.get(campo) for campo in campos_periodo)
+    if not tiene_periodo:
+        errores.append("No se encontró información de período")
+    
+    # Validar días facturados
+    if not datos.get("dias_facturados"):
+        errores.append("No se encontraron días facturados")
+    
+    # Validar confidence score
+    confidence = datos.get("confidence_score", 0)
+    if confidence < 0.5:
+        errores.append(f"Confidence score muy bajo: {confidence:.2f}")
+    
+    # En modo strict, fallar si hay errores críticos
+    if strict and errores:
+        return False, errores
+    
+    return True, errores
+
+def guardar_archivos_ocr(datos: Dict[str, Any], factura_path: Path):
+    """Guarda los archivos generados por el extractor OCR."""
+    # Crear directorios
+    ensure_dirs("outputs/extract/raw_text", "outputs/extract/meta")
+    
+    # Guardar texto crudo OCR
+    if hasattr(datos, 'texto_por_pagina') and datos['texto_por_pagina']:
+        raw_text_path = Path("outputs/extract/raw_text") / f"{datos['pdf_sha1']}.txt"
+        with open(raw_text_path, 'w', encoding='utf-8') as f:
+            for i, texto_pagina in enumerate(datos['texto_por_pagina'], 1):
+                f.write(f"=== PÁGINA {i} ===\n")
+                f.write(texto_pagina)
+                f.write("\n\n")
+    
+    # Guardar JSON meta
+    meta_data = {
+        "datos_extraidos": datos,
+        "metadatos": {
+            "pdf_filename": datos.get("pdf_filename"),
+            "pdf_sha1": datos.get("pdf_sha1"),
+            "processed_at": datetime.now().isoformat(),
+            "needs_ocr": datos.get("needs_ocr", False),
+            "confidence_score": datos.get("confidence_score", 0),
+            "confidence_reasons": datos.get("confidence_reasons", []),
+            "banderas": {
+                "reconciliacion_ok": datos.get("reconciliacion_ok", False),
+                "periodo_ok": datos.get("periodo_ok", False),
+                "cude_ok": datos.get("cude_ok", False),
+                "completitud_ok": datos.get("completitud_ok", False),
+                "reconciliacion_diff_cop": datos.get("reconciliacion_diff_cop", 0)
+            }
+        }
+    }
+    
+    meta_path = Path("outputs/extract/meta") / f"{factura_path.stem}__{datos['pdf_sha1']}.json"
+    with open(meta_path, 'w', encoding='utf-8') as f:
+        json.dump(meta_data, f, ensure_ascii=False, indent=2)
+
+def actualizar_csv_maestro(datos: Dict[str, Any]):
+    """Actualiza el CSV maestro con upsert por pdf_sha1."""
+    csv_path = Path("outputs/maestro.csv")
+    
+    # Definir columnas del CSV
+    columnas = [
+        'pdf_sha1', 'pdf_filename', 'contrato', 'cude', 'npe', 'estado_cuenta_numero',
+        'mes_cuenta', 'periodo_inicio', 'periodo_fin', 'dias_facturados',
+        'uso_clase', 'direccion_suministro', 'ruta', 'ciclo',
+        'energia_base_cop', 'energia_total_cop', 'ap_cop', 'ts_cop', 'iva_cop',
+        'otros_cargos_cop', 'total_pagar_cop',
+        'acueducto_cop', 'alcantarillado_cop', 'aseo_cop',
+        'acueducto_m3', 'alcantarillado_m3', 'tarifas_unitarias',
+        'ultimo_pago_fecha', 'ultimo_pago_valor_cop',
+        'needs_ocr', 'confidence_score', 'confidence_reasons',
+        'reconciliacion_ok', 'periodo_ok', 'cude_ok', 'completitud_ok',
+        'reconciliacion_diff_cop', 'processed_at'
+    ]
+    
+    # Preparar datos para CSV
+    row_data = {}
+    for columna in columnas:
+        if columna == 'otros_cargos_cop':
+            otros = datos.get(columna, [])
+            row_data[columna] = '; '.join([f"{item.get('nombre', '')}: {item.get('valor', '')}" for item in otros])
+        elif columna == 'tarifas_unitarias':
+            tarifas = datos.get(columna, [])
+            row_data[columna] = '; '.join([str(t) for t in tarifas])
+        elif columna == 'confidence_reasons':
+            reasons = datos.get(columna, [])
+            row_data[columna] = '; '.join(reasons)
+        else:
+            row_data[columna] = datos.get(columna, '')
+    
+    # Crear CSV si no existe
+    if not csv_path.exists():
+        with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=columnas)
+            writer.writeheader()
+    
+    # Buscar si ya existe la fila (upsert)
+    rows = []
+    found = False
+    
+    if csv_path.exists():
+        with open(csv_path, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row.get('pdf_sha1') == datos['pdf_sha1']:
+                    rows.append(row_data)  # Reemplazar con datos actualizados
+                    found = True
+                else:
+                    rows.append(row)
+    
+    if not found:
+        rows.append(row_data)
+    
+    # Escribir CSV actualizado
+    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=columnas)
+        writer.writeheader()
+        writer.writerows(rows)
+
+def procesar_lote_facturas(directorio_entrada: str = "data", directorio_salida: str = "outputs", 
+                          force_ocr: bool = False, strict: bool = False) -> Dict[str, Any]:
+    """
+    Procesa un lote de facturas usando el extractor OCR.
+    
+    Args:
+        directorio_entrada: Directorio con PDFs
+        directorio_salida: Directorio de salida
+        force_ocr: Si forzar OCR
+        strict: Si fallar en validaciones críticas
+        
+    Returns:
+        Resumen del procesamiento
+    """
+    print("🚀 Iniciando Procesamiento OCR de Facturas EMCALI")
+    print("=" * 70)
+    
+    # Obtener facturas
+    facturas = listar_facturas(directorio_entrada)
+    if not facturas:
+        return {"error": f"No se encontraron archivos PDF en {directorio_entrada}/"}
+    
+    # Obtener facturas ya procesadas
+    facturas_procesadas = obtener_facturas_procesadas()
+    
+    # Mostrar estado
+    print(f"📋 Total de facturas encontradas: {len(facturas)}")
+    print(f"✅ Ya procesadas: {len(facturas_procesadas)}")
+    print(f"🆕 Nuevas por procesar: {len(facturas) - len(facturas_procesadas)}")
+    print()
+    
+    # Procesar cada factura
+    resultados = []
+    exitosos = 0
+    fallidos = 0
+    
+    for i, factura in enumerate(facturas, 1):
+        pdf_sha1 = hashlib.sha1(factura.read_bytes()).hexdigest()
+        
+        if pdf_sha1 in facturas_procesadas:
+            print(f"⏭️ {i}/{len(facturas)} Saltando {factura.name} (ya procesada)")
+            continue
+        
+        print(f"🔄 {i}/{len(facturas)} Procesando {factura.name}")
+        resultado = procesar_factura_ocr(factura, force_ocr, strict)
+        resultados.append(resultado)
+        
+        if resultado["success"]:
+            exitosos += 1
+            print(f"✅ {factura.name} procesada exitosamente")
+        else:
+            fallidos += 1
+            print(f"❌ {factura.name} falló: {resultado['errors']}")
+    
+    # Resumen final
+    print("\n" + "=" * 70)
+    print("📊 RESUMEN DEL PROCESAMIENTO OCR")
+    print("=" * 70)
+    
+    print(f"✅ Exitosos: {exitosos}")
+    print(f"❌ Fallidos: {fallidos}")
+    print(f"📁 Archivos generados en {directorio_salida}/extract/")
+    
+    if fallidos > 0:
+        print("\n⚠️ Facturas con errores:")
+        for resultado in resultados:
+            if not resultado["success"]:
+                print(f"   - {Path(resultado['source_path']).name}: {resultado['errors']}")
+    
+    return {
+        "total_facturas": len(facturas),
+        "exitosos": exitosos,
+        "fallidos": fallidos,
+        "resultados": resultados
+    }
+
+def main():
+    """Función principal para procesamiento por lotes."""
+    try:
+        procesar_lote_facturas()
+    except KeyboardInterrupt:
+        print("\n⏹️ Procesamiento interrumpido por el usuario")
+    except Exception as e:
+        print(f"\n❌ Error inesperado: {e}")
+
+if __name__ == "__main__":
+    main()
