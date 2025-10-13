@@ -1,0 +1,46 @@
+# -*- coding: utf-8 -*-
+"""
+extractor_simple.py — Extractor simple de texto de PDFs
+"""
+
+import fitz  # PyMuPDF
+from pathlib import Path
+
+def leer_pdf(ruta_pdf: str) -> str:
+    """
+    Lee el contenido de un archivo PDF y retorna el texto extraído.
+    
+    Args:
+        ruta_pdf: Ruta al archivo PDF
+        
+    Returns:
+        Texto extraído del PDF
+    """
+    try:
+        # Abrir el documento PDF
+        doc = fitz.open(ruta_pdf)
+        
+        texto_completo = ""
+        
+        # Extraer texto de cada página
+        for pagina_num in range(len(doc)):
+            pagina = doc.load_page(pagina_num)
+            texto_pagina = pagina.get_text()
+            texto_completo += texto_pagina + "\n"
+        
+        # Cerrar el documento
+        doc.close()
+        
+        # Limpiar el texto
+        texto_limpiado = texto_completo.strip()
+        
+        # Verificar que el texto no esté corrupto
+        if len(texto_limpiado) < 100:
+            print(f"⚠️ Advertencia: Texto extraído muy corto ({len(texto_limpiado)} caracteres)")
+            print(f"Primeros 200 caracteres: {texto_limpiado[:200]}")
+        
+        return texto_limpiado
+        
+    except Exception as e:
+        print(f"❌ Error leyendo PDF {ruta_pdf}: {e}")
+        return ""
