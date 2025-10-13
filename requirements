@@ -1,0 +1,13 @@
+openai
+python-dotenv
+pdfplumber
+python-docx
+pandas
+pymupdf
+pydantic>=2
+jsonschema
+pyyaml
+pytesseract
+opencv-python
+pillow
+numpy
