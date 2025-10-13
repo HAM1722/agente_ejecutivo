@@ -1,0 +1,191 @@
+# Catálogo de sinónimos para extracción layout-agnóstica de facturas EMCALI
+# Permite encontrar campos independientemente de la maquetación del PDF
+
+identificacion:
+  contrato:
+    - "Contrato"
+    - "No. Contrato"
+    - "N. Contrato"
+    - "Número de Contrato"
+    - "CONTRATO"
+  
+  cude:
+    - "CUDE"
+    - "Código Único de Documento"
+    - "Código Único"
+    - "Código Documento"
+  
+  npe:
+    - "NPE"
+    - "Número de Pago Electrónico"
+    - "Número Pago Electrónico"
+  
+  estado_cuenta:
+    - "Estado de Cuenta"
+    - "Estado Cuenta"
+    - "Número Estado de Cuenta"
+    - "No. Estado de Cuenta"
+
+periodo:
+  mes_cuenta:
+    - "Mes de Cuenta"
+    - "Mes Cuenta"
+    - "Período de Facturación"
+    - "Periodo de Facturación"
+    - "Mes Facturación"
+  
+  periodo_inicio:
+    - "Desde"
+    - "Inicio"
+    - "Fecha Inicio"
+    - "Fecha Desde"
+    - "Período Desde"
+    - "Periodo Desde"
+  
+  periodo_fin:
+    - "Hasta"
+    - "Fin"
+    - "Fecha Fin"
+    - "Fecha Hasta"
+    - "Período Hasta"
+    - "Periodo Hasta"
+  
+  dias_facturados:
+    - "Días Facturados"
+    - "Dias Facturados"
+    - "Días de Facturación"
+    - "Dias de Facturacion"
+    - "Días"
+    - "Dias"
+
+uso_clase:
+  - "Uso Clase"
+  - "Clase de Uso"
+  - "Tipo de Uso"
+  - "Clasificación"
+  - "Categoría"
+
+direccion:
+  - "Dirección"
+  - "Direccion"
+  - "Dirección de Suministro"
+  - "Direccion de Suministro"
+  - "Dirección Instalación"
+  - "Direccion Instalacion"
+
+ruta_ciclo:
+  ruta:
+    - "Ruta"
+    - "No. Ruta"
+    - "Número Ruta"
+  
+  ciclo:
+    - "Ciclo"
+    - "No. Ciclo"
+    - "Número Ciclo"
+
+energia:
+  energia_base:
+    - "Energía Base"
+    - "Energia Base"
+    - "Base Energía"
+    - "Base Energia"
+    - "Consumo Base"
+    - "Energía"
+    - "Energia"
+  
+  energia_total:
+    - "Total Energía"
+    - "Total Energia"
+    - "Subtotal Energía"
+    - "Subtotal Energia"
+    - "Total Servicios EMCALI"
+    - "Subtotal Servicios EMCALI"
+  
+  ap:
+    - "Alumbrado Público"
+    - "Alumbrado Publico"
+    - "AP"
+    - "Aportes"
+    - "Alumbrado"
+    - "ALUMB.PUB"
+    - "ALUMB.PUB.NORESIDENCIALCALI"
+  
+  ts:
+    - "Tasa de Seguridad"
+    - "Tasa Seguridad"
+    - "TS"
+    - "Tasa"
+    - "Seguridad"
+  
+  iva:
+    - "IVA"
+    - "I.V.A"
+    - "Impuesto al Valor Agregado"
+    - "Impuesto Valor Agregado"
+  
+  otros_cargos:
+    - "Otros Cargos"
+    - "Cargos Adicionales"
+    - "Otros"
+    - "Cargos"
+    - "Otros Servicios"
+  
+  total_pagar:
+    - "Total a Pagar"
+    - "Total A Pagar"
+    - "TOTAL A PAGAR"
+    - "Total"
+    - "Total Factura"
+
+agua_aseo:
+  acueducto:
+    - "Acueducto"
+    - "Servicio de Acueducto"
+    - "Agua"
+    - "Consumo Agua"
+    - "M3 Agua"
+  
+  alcantarillado:
+    - "Alcantarillado"
+    - "Servicio de Alcantarillado"
+    - "Alcantarillado"
+    - "M3 Alcantarillado"
+  
+  aseo:
+    - "Aseo"
+    - "Servicio de Aseo"
+    - "Recolección de Basuras"
+    - "Recoleccion de Basuras"
+    - "Basuras"
+
+pagos:
+  ultimo_pago:
+    - "Último Pago"
+    - "Ultimo Pago"
+    - "Pago Anterior"
+    - "Último Pago Realizado"
+    - "Ultimo Pago Realizado"
+    - "Fecha Último Pago"
+    - "Fecha Ultimo Pago"
+
+valores_monetarios:
+  patrones_cop:
+    - r'\$?\s*[\d,]+\.?\d*'
+    - r'[\d,]+\.?\d*\s*COP'
+    - r'[\d,]+\.?\d*\s*\$'
+    - r'[\d,]+\.?\d*'
+
+fechas:
+  patrones:
+    - r'\d{1,2}/\d{1,2}/\d{4}'
+    - r'\d{1,2}-\d{1,2}-\d{4}'
+    - r'\d{4}-\d{2}-\d{2}'
+    - r'[A-Z]{3}\s+\d{1,2}'
+    - r'\d{1,2}\s+[A-Z]{3}\s+\d{2,4}'
+
+cude:
+  patrones:
+    - r'[A-Z0-9]{20,}'
+    - r'\d{20,}'
+    - r'[A-Z0-9]{10,}'
