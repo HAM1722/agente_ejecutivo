@@ -1,0 +1,499 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+CLI para el pipeline de procesamiento de facturas EMCALI
+Incluye flags para procesamiento OCR y tests de regresión
+"""
+
+import argparse
+import sys
+import json
+import csv
+from pathlib import Path
+from typing import Dict, List, Any, Optional
+from datetime import datetime
+
+# Agregar el directorio src al path
+sys.path.insert(0, str(Path(__file__).parent))
+
+from procesar_factura_ocr import procesar_lote_facturas, procesar_factura_ocr, listar_facturas, obtener_facturas_procesadas
+from utils import file_sha256
+
+
+def procesar_una_factura(archivo_pdf: str) -> Dict[str, Any]:
+    """
+    Procesa una factura específica.
+    
+    Args:
+        archivo_pdf: Ruta al archivo PDF
+        
+    Returns:
+        Resultado del procesamiento
+    """
+    pdf_path = Path(archivo_pdf)
+    if not pdf_path.exists():
+        return {"error": f"Archivo no encontrado: {archivo_pdf}"}
+    
+    print(f"🔄 Procesando factura específica: {pdf_path.name}")
+    return procesar_factura_ocr(pdf_path)
+
+
+def reprocesar_todas() -> Dict[str, Any]:
+    """
+    Reprocesa todas las facturas existentes.
+    
+    Returns:
+        Resumen del reprocesamiento
+    """
+    print("🔄 Reprocesando todas las facturas...")
+    
+    facturas = listar_facturas()
+    if not facturas:
+        return {"error": "No se encontraron archivos PDF en data/"}
+    
+    resultados = []
+    for i, factura in enumerate(facturas, 1):
+        print(f"🔄 {i}/{len(facturas)} Reprocesando {factura.name}")
+        resultado = procesar_factura_ocr(factura)
+        resultados.append(resultado)
+    
+    # Resumen
+    exitosos = sum(1 for r in resultados if r.get("success", False))
+    fallidos = len(resultados) - exitosos
+    
+    return {
+        "total_facturas": len(facturas),
+        "exitosos": exitosos,
+        "fallidos": fallidos,
+        "resultados": resultados
+    }
+
+
+def generar_reporte() -> Dict[str, Any]:
+    """
+    Genera reporte de métricas y calidad.
+    
+    Returns:
+        Diccionario con métricas del reporte
+    """
+    csv_path = Path("outputs/facturas_emcali.csv")
+    if not csv_path.exists():
+        return {"error": "No se encontró el CSV de facturas procesadas"}
+    
+    # Leer CSV
+    facturas = []
+    with open(csv_path, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            facturas.append(row)
+    
+    if not facturas:
+        return {"error": "CSV vacío"}
+    
+    # Calcular métricas
+    total_facturas = len(facturas)
+    
+    # Confidence scores
+    confidence_scores = []
+    for factura in facturas:
+        try:
+            score = float(factura.get('confidence_score', 0))
+            confidence_scores.append(score)
+        except (ValueError, TypeError):
+            confidence_scores.append(0.0)
+    
+    avg_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0.0
+    high_confidence = sum(1 for score in confidence_scores if score >= 0.9)
+    low_confidence = sum(1 for score in confidence_scores if score < 0.7)
+    
+    # Flags de calidad
+    total_flags = 0
+    flag_counts = {}
+    for factura in facturas:
+        flags = factura.get('flags_join', '').split(';') if factura.get('flags_join') else []
+        total_flags += len(flags)
+        for flag in flags:
+            if flag:
+                flag_counts[flag] = flag_counts.get(flag, 0) + 1
+    
+    # Totales monetarios
+    total_pagar_sum = 0.0
+    for factura in facturas:
+        try:
+            total = float(factura.get('total_pagar_cop', 0))
+            total_pagar_sum += total
+        except (ValueError, TypeError):
+            pass
+    
+    return {
+        "total_facturas": total_facturas,
+        "confidence_metrics": {
+            "promedio": round(avg_confidence, 3),
+            "alta_confianza": high_confidence,
+            "baja_confianza": low_confidence,
+            "porcentaje_alta": round((high_confidence / total_facturas) * 100, 1) if total_facturas > 0 else 0
+        },
+        "quality_flags": {
+            "total_flags": total_flags,
+            "promedio_por_factura": round(total_flags / total_facturas, 2) if total_facturas > 0 else 0,
+            "flag_counts": flag_counts
+        },
+        "monetary": {
+            "total_facturado": round(total_pagar_sum, 2)
+        },
+        "periodo": {
+            "primera_factura": min((f.get('processed_at', '') for f in facturas), default=''),
+            "ultima_factura": max((f.get('processed_at', '') for f in facturas), default='')
+        }
+    }
+
+
+def ejecutar_tests_golden() -> Dict[str, Any]:
+    """
+    Ejecuta tests de regresión contra golden set.
+    
+    Returns:
+        Resultados de los tests
+    """
+    golden_dir = Path("tests/golden")
+    if not golden_dir.exists():
+        return {"error": "No se encontró el directorio tests/golden"}
+    
+    # Buscar archivos golden
+    golden_files = list(golden_dir.glob("*.pdf"))
+    if not golden_files:
+        return {"error": "No se encontraron archivos PDF en tests/golden"}
+    
+    resultados = []
+    exitosos = 0
+    fallidos = 0
+    
+    for pdf_file in golden_files:
+        print(f"🧪 Probando golden: {pdf_file.name}")
+        
+        # Calcular hash
+        pdf_hash = file_sha256(str(pdf_file))
+        
+        # Buscar JSON esperado
+        json_esperado_path = golden_dir / f"{pdf_hash}.json"
+        if not json_esperado_path.exists():
+            print(f"⚠️ No se encontró JSON esperado para {pdf_file.name}")
+            fallidos += 1
+            continue
+        
+        # Procesar factura
+        resultado = procesar_factura_pipeline(pdf_file)
+        if not resultado.get("success", False):
+            print(f"❌ Error procesando {pdf_file.name}")
+            fallidos += 1
+            continue
+        
+        # Comparar con golden
+        json_resultado_path = Path("outputs/json") / f"{pdf_hash}.json"
+        if not json_resultado_path.exists():
+            print(f"❌ No se generó JSON para {pdf_file.name}")
+            fallidos += 1
+            continue
+        
+        # Cargar archivos para comparación
+        try:
+            with open(json_esperado_path, 'r', encoding='utf-8') as f:
+                golden_data = json.load(f)
+            
+            with open(json_resultado_path, 'r', encoding='utf-8') as f:
+                resultado_data = json.load(f)
+            
+            # Comparar campos críticos
+            diferencias = comparar_datos(golden_data, resultado_data)
+            
+            if diferencias:
+                print(f"❌ Diferencias encontradas en {pdf_file.name}: {diferencias}")
+                fallidos += 1
+            else:
+                print(f"✅ Test pasado para {pdf_file.name}")
+                exitosos += 1
+            
+            resultados.append({
+                "archivo": pdf_file.name,
+                "exitoso": not diferencias,
+                "diferencias": diferencias
+            })
+            
+        except Exception as e:
+            print(f"❌ Error comparando {pdf_file.name}: {e}")
+            fallidos += 1
+    
+    return {
+        "total_tests": len(golden_files),
+        "exitosos": exitosos,
+        "fallidos": fallidos,
+        "porcentaje_exito": round((exitosos / len(golden_files)) * 100, 1) if golden_files else 0,
+        "resultados": resultados
+    }
+
+
+def comparar_datos(golden: Dict[str, Any], resultado: Dict[str, Any]) -> List[str]:
+    """
+    Compara datos golden con resultado actual.
+    
+    Args:
+        golden: Datos golden esperados
+        resultado: Datos actuales
+        
+    Returns:
+        Lista de diferencias encontradas
+    """
+    diferencias = []
+    
+    # Campos críticos a comparar
+    campos_criticos = [
+        'total_pagar_cop',
+        'energia_total_cop',
+        'acueducto_total_cop',
+        'alcantarillado_total_cop',
+        'aseo_total_cop',
+        'ap_total_cop',
+        'ts_total_cop',
+        'iva_total_cop'
+    ]
+    
+    golden_canonica = golden.get('canonica', {})
+    resultado_canonica = resultado.get('canonica', {})
+    
+    for campo in campos_criticos:
+        golden_valor = golden_canonica.get(campo, 0)
+        resultado_valor = resultado_canonica.get(campo, 0)
+        
+        # Comparar con tolerancia
+        if isinstance(golden_valor, (int, float)) and isinstance(resultado_valor, (int, float)):
+            diferencia = abs(golden_valor - resultado_valor)
+            if diferencia > 1.0:  # Tolerancia de 1 COP
+                diferencias.append(f"{campo}: golden={golden_valor}, actual={resultado_valor}")
+    
+    return diferencias
+
+
+def imprimir_reporte(reporte: Dict[str, Any]):
+    """Imprime el reporte de métricas de forma legible."""
+    if "error" in reporte:
+        print(f"❌ Error: {reporte['error']}")
+        return
+    
+    print("\n" + "=" * 60)
+    print("📊 REPORTE DE MÉTRICAS - PIPELINE EMCALI")
+    print("=" * 60)
+    
+    print(f"📋 Total de facturas procesadas: {reporte['total_facturas']}")
+    
+    # Métricas de confianza
+    conf = reporte['confidence_metrics']
+    print(f"\n🎯 MÉTRICAS DE CONFIANZA:")
+    print(f"   Promedio: {conf['promedio']:.1%}")
+    print(f"   Alta confianza (≥90%): {conf['alta_confianza']} ({conf['porcentaje_alta']}%)")
+    print(f"   Baja confianza (<70%): {conf['baja_confianza']}")
+    
+    # Flags de calidad
+    flags = reporte['quality_flags']
+    print(f"\n🏷️ FLAGS DE CALIDAD:")
+    print(f"   Total de flags: {flags['total_flags']}")
+    print(f"   Promedio por factura: {flags['promedio_por_factura']}")
+    
+    if flags['flag_counts']:
+        print("   Flags más comunes:")
+        for flag, count in sorted(flags['flag_counts'].items(), key=lambda x: x[1], reverse=True)[:5]:
+            print(f"     • {flag}: {count}")
+    
+    # Métricas monetarias
+    monetary = reporte['monetary']
+    print(f"\n💰 MÉTRICAS MONETARIAS:")
+    print(f"   Total facturado: ${monetary['total_facturado']:,.2f} COP")
+    
+    # Período
+    periodo = reporte['periodo']
+    if periodo['primera_factura'] and periodo['ultima_factura']:
+        print(f"\n📅 PERÍODO:")
+        print(f"   Primera factura: {periodo['primera_factura'][:10]}")
+        print(f"   Última factura: {periodo['ultima_factura'][:10]}")
+
+
+def imprimir_tests_resultado(resultado: Dict[str, Any]):
+    """Imprime el resultado de los tests de regresión."""
+    if "error" in resultado:
+        print(f"❌ Error: {resultado['error']}")
+        return
+    
+    print("\n" + "=" * 60)
+    print("🧪 RESULTADOS DE TESTS DE REGRESIÓN")
+    print("=" * 60)
+    
+    print(f"📋 Total de tests: {resultado['total_tests']}")
+    print(f"✅ Exitosos: {resultado['exitosos']}")
+    print(f"❌ Fallidos: {resultado['fallidos']}")
+    print(f"📊 Porcentaje de éxito: {resultado['porcentaje_exito']}%")
+    
+    if resultado['resultados']:
+        print(f"\n📝 DETALLE DE RESULTADOS:")
+        for test in resultado['resultados']:
+            status = "✅" if test['exitoso'] else "❌"
+            print(f"   {status} {test['archivo']}")
+            if test['diferencias']:
+                for diff in test['diferencias']:
+                    print(f"      ⚠️ {diff}")
+
+
+def main():
+    """Función principal del CLI."""
+    print("🔍 CLI iniciado...")
+    parser = argparse.ArgumentParser(
+        description="CLI para procesamiento de facturas EMCALI",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Ejemplos de uso:
+  python -m src.cli --extract-only                    # Solo extracción OCR (sin LLM/DOCX)
+  python -m src.cli --extract-only --force-ocr        # Forzar OCR
+  python -m src.cli --extract-only --strict           # Modo estricto
+  python -m src.cli --extract-only --input-dir data --output-dir outputs  # Directorios personalizados
+  python -m src.cli --reprocess                       # Reprocesar todas las facturas (modo LLM)
+  python -m src.cli --report                          # Generar reporte de métricas
+  python -m src.cli --one factura.pdf                 # Procesar una factura específica
+  python -m src.cli --test                            # Ejecutar tests de regresión
+        """
+    )
+    
+    # Flags para extracción OCR
+    parser.add_argument(
+        '--extract-only',
+        action='store_true',
+        help='Solo extracción OCR (sin LLM, sin DOCX)'
+    )
+    
+    parser.add_argument(
+        '--force-ocr',
+        action='store_true',
+        help='Forzar OCR aunque haya texto embebido'
+    )
+    
+    parser.add_argument(
+        '--strict',
+        action='store_true',
+        help='Falla si no pasa conciliación o completitud'
+    )
+    
+    parser.add_argument(
+        '--input-dir',
+        type=str,
+        default='data',
+        help='Directorio de entrada con PDFs (default: data)'
+    )
+    
+    parser.add_argument(
+        '--output-dir',
+        type=str,
+        default='outputs',
+        help='Directorio de salida (default: outputs)'
+    )
+    
+    # Flags legacy para modo LLM
+    parser.add_argument(
+        '--reprocess',
+        action='store_true',
+        help='Reprocesar todas las facturas (modo LLM)'
+    )
+    
+    parser.add_argument(
+        '--report',
+        action='store_true',
+        help='Generar reporte de métricas y calidad'
+    )
+    
+    parser.add_argument(
+        '--one',
+        type=str,
+        help='Procesar una factura específica (ruta al PDF)'
+    )
+    
+    parser.add_argument(
+        '--test',
+        action='store_true',
+        help='Ejecutar tests de regresión contra golden set'
+    )
+    
+    args = parser.parse_args()
+    
+    try:
+        if args.extract_only:
+            print("🔍 Iniciando extracción OCR...")
+            resultado = procesar_lote_facturas(
+                directorio_entrada=args.input_dir,
+                directorio_salida=args.output_dir,
+                force_ocr=args.force_ocr,
+                strict=args.strict
+            )
+            
+            if "error" in resultado:
+                print(f"❌ Error: {resultado['error']}")
+                sys.exit(1)
+            else:
+                print(f"✅ Extracción completada: {resultado['exitosos']} exitosos, {resultado['fallidos']} fallidos")
+                
+        elif args.report:
+            print("📊 Generando reporte de métricas...")
+            reporte = generar_reporte()
+            imprimir_reporte(reporte)
+            
+        elif args.test:
+            print("🧪 Ejecutando tests de regresión...")
+            resultado = ejecutar_tests_golden()
+            imprimir_tests_resultado(resultado)
+            
+        elif args.one:
+            if not args.one:
+                print("❌ Error: Debe especificar la ruta al archivo PDF")
+                sys.exit(1)
+            
+            # Determinar si usar OCR o LLM basado en la extensión o contenido
+            if args.one.endswith('.pdf'):
+                resultado = procesar_factura_ocr(Path(args.one), args.force_ocr, args.strict)
+            else:
+                resultado = procesar_una_factura(args.one)
+                
+            if "error" in resultado or not resultado.get("success", False):
+                print(f"❌ Error: {resultado.get('error', resultado.get('errors', 'Error desconocido'))}")
+                sys.exit(1)
+            else:
+                print("✅ Factura procesada exitosamente")
+                
+        elif args.reprocess:
+            resultado = reprocesar_todas()
+            if "error" in resultado:
+                print(f"❌ Error: {resultado['error']}")
+                sys.exit(1)
+            else:
+                print(f"✅ Reprocesamiento completado: {resultado['exitosos']} exitosos, {resultado['fallidos']} fallidos")
+                
+        else:
+            # Modo por defecto: extracción OCR
+            print("🔍 Iniciando extracción OCR (modo por defecto)...")
+            resultado = procesar_lote_facturas(
+                directorio_entrada=args.input_dir,
+                directorio_salida=args.output_dir,
+                force_ocr=args.force_ocr,
+                strict=args.strict
+            )
+            
+            if "error" in resultado:
+                print(f"❌ Error: {resultado['error']}")
+                sys.exit(1)
+            else:
+                print(f"✅ Extracción completada: {resultado['exitosos']} exitosos, {resultado['fallidos']} fallidos")
+            
+    except KeyboardInterrupt:
+        print("\n⏹️ Operación interrumpida por el usuario")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n❌ Error inesperado: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
