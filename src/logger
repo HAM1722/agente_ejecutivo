@@ -1,0 +1,309 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+logger.py — Logging estructurado para el pipeline de procesamiento
+"""
+
+import json
+import logging
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, Any, Optional
+from functools import wraps
+
+
+class PipelineLogger:
+    """Logger estructurado para el pipeline de procesamiento de facturas."""
+    
+    def __init__(self, log_file: str = "outputs/pipeline.log"):
+        self.log_file = Path(log_file)
+        self.log_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Configurar logger
+        self.logger = logging.getLogger('pipeline_emcali')
+        self.logger.setLevel(logging.INFO)
+        
+        # Handler para archivo
+        file_handler = logging.FileHandler(self.log_file, encoding='utf-8')
+        file_handler.setLevel(logging.INFO)
+        
+        # Formatter JSON
+        formatter = logging.Formatter('%(message)s')
+        file_handler.setFormatter(formatter)
+        
+        self.logger.addHandler(file_handler)
+        self.logger.propagate = False
+    
+    def log_event(self, stage: str, pdf_hash: str, event: str, 
+                  elapsed_ms: Optional[float] = None, 
+                  flags: Optional[list] = None, 
+                  score: Optional[float] = None,
+                  **kwargs):
+        """
+        Registra un evento del pipeline.
+        
+        Args:
+            stage: Etapa del pipeline (extract, analyze, validate, etc.)
+            pdf_hash: Hash del PDF procesado
+            event: Tipo de evento (start, success, error, warning)
+            elapsed_ms: Tiempo transcurrido en milisegundos
+            flags: Lista de flags de calidad
+            score: Score de confianza
+            **kwargs: Datos adicionales
+        """
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "stage": stage,
+            "pdf_hash": pdf_hash,
+            "event": event,
+            "elapsed_ms": elapsed_ms,
+            "flags": flags,
+            "confidence_score": score,
+            **kwargs
+        }
+        
+        # Remover campos None
+        log_entry = {k: v for k, v in log_entry.items() if v is not None}
+        
+        self.logger.info(json.dumps(log_entry, ensure_ascii=False))
+    
+    def log_pipeline_start(self, pdf_hash: str, source_path: str):
+        """Registra inicio del pipeline."""
+        self.log_event(
+            stage="pipeline",
+            pdf_hash=pdf_hash,
+            event="start",
+            source_path=source_path
+        )
+    
+    def log_pipeline_success(self, pdf_hash: str, elapsed_ms: float, 
+                           flags: list, score: float):
+        """Registra éxito del pipeline."""
+        self.log_event(
+            stage="pipeline",
+            pdf_hash=pdf_hash,
+            event="success",
+            elapsed_ms=elapsed_ms,
+            flags=flags,
+            confidence_score=score
+        )
+    
+    def log_pipeline_error(self, pdf_hash: str, error: str, elapsed_ms: float = None):
+        """Registra error del pipeline."""
+        self.log_event(
+            stage="pipeline",
+            pdf_hash=pdf_hash,
+            event="error",
+            error=error,
+            elapsed_ms=elapsed_ms
+        )
+    
+    def log_stage_start(self, stage: str, pdf_hash: str):
+        """Registra inicio de una etapa."""
+        self.log_event(
+            stage=stage,
+            pdf_hash=pdf_hash,
+            event="start"
+        )
+    
+    def log_stage_success(self, stage: str, pdf_hash: str, elapsed_ms: float, **kwargs):
+        """Registra éxito de una etapa."""
+        self.log_event(
+            stage=stage,
+            pdf_hash=pdf_hash,
+            event="success",
+            elapsed_ms=elapsed_ms,
+            **kwargs
+        )
+    
+    def log_stage_error(self, stage: str, pdf_hash: str, error: str, elapsed_ms: float = None):
+        """Registra error de una etapa."""
+        self.log_event(
+            stage=stage,
+            pdf_hash=pdf_hash,
+            event="error",
+            error=error,
+            elapsed_ms=elapsed_ms
+        )
+    
+    def log_validation_result(self, pdf_hash: str, schema_errors: list, 
+                            balance_ok: bool, delta: float, flags: list, score: float):
+        """Registra resultado de validación."""
+        self.log_event(
+            stage="validation",
+            pdf_hash=pdf_hash,
+            event="result",
+            schema_errors_count=len(schema_errors),
+            balance_ok=balance_ok,
+            delta=delta,
+            flags=flags,
+            confidence_score=score
+        )
+
+
+# Instancia global del logger
+pipeline_logger = PipelineLogger()
+
+
+def log_pipeline_stage(stage_name: str):
+    """
+    Decorador para logging automático de etapas del pipeline.
+    
+    Args:
+        stage_name: Nombre de la etapa
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # Extraer pdf_hash de los argumentos si está disponible
+            pdf_hash = None
+            if args and hasattr(args[0], 'pdf_hash'):
+                pdf_hash = args[0].pdf_hash
+            elif 'pdf_hash' in kwargs:
+                pdf_hash = kwargs['pdf_hash']
+            
+            if pdf_hash:
+                pipeline_logger.log_stage_start(stage_name, pdf_hash)
+            
+            start_time = time.time()
+            
+            try:
+                result = func(*args, **kwargs)
+                elapsed_ms = (time.time() - start_time) * 1000
+                
+                if pdf_hash:
+                    pipeline_logger.log_stage_success(stage_name, pdf_hash, elapsed_ms)
+                
+                return result
+                
+            except Exception as e:
+                elapsed_ms = (time.time() - start_time) * 1000
+                
+                if pdf_hash:
+                    pipeline_logger.log_stage_error(stage_name, pdf_hash, str(e), elapsed_ms)
+                
+                raise
+        
+        return wrapper
+    return decorator
+
+
+def log_pipeline_function(func):
+    """
+    Decorador para logging automático de funciones del pipeline.
+    """
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        # Intentar extraer pdf_hash
+        pdf_hash = None
+        if args and isinstance(args[0], str):
+            # Si el primer argumento es un path, calcular hash
+            try:
+                from utils import file_sha256
+                pdf_hash = file_sha256(args[0])
+            except:
+                pass
+        
+        if pdf_hash:
+            pipeline_logger.log_pipeline_start(pdf_hash, str(args[0]) if args else "")
+        
+        start_time = time.time()
+        
+        try:
+            result = func(*args, **kwargs)
+            elapsed_ms = (time.time() - start_time) * 1000
+            
+            if pdf_hash and isinstance(result, dict):
+                flags = result.get('flags', [])
+                score = result.get('confidence_score', 0.0)
+                pipeline_logger.log_pipeline_success(pdf_hash, elapsed_ms, flags, score)
+            
+            return result
+            
+        except Exception as e:
+            elapsed_ms = (time.time() - start_time) * 1000
+            
+            if pdf_hash:
+                pipeline_logger.log_pipeline_error(pdf_hash, str(e), elapsed_ms)
+            
+            raise
+    
+    return wrapper
+
+
+def get_pipeline_stats(log_file: str = "outputs/pipeline.log") -> Dict[str, Any]:
+    """
+    Genera estadísticas del pipeline desde los logs.
+    
+    Args:
+        log_file: Ruta al archivo de log
+        
+    Returns:
+        Diccionario con estadísticas
+    """
+    log_path = Path(log_file)
+    if not log_path.exists():
+        return {"error": "Archivo de log no encontrado"}
+    
+    stats = {
+        "total_events": 0,
+        "stages": {},
+        "events": {},
+        "errors": [],
+        "processing_times": [],
+        "confidence_scores": []
+    }
+    
+    try:
+        with open(log_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                try:
+                    event = json.loads(line.strip())
+                    stats["total_events"] += 1
+                    
+                    # Contar por etapa
+                    stage = event.get('stage', 'unknown')
+                    stats["stages"][stage] = stats["stages"].get(stage, 0) + 1
+                    
+                    # Contar por tipo de evento
+                    event_type = event.get('event', 'unknown')
+                    stats["events"][event_type] = stats["events"].get(event_type, 0) + 1
+                    
+                    # Recolectar errores
+                    if event_type == 'error':
+                        stats["errors"].append({
+                            "stage": stage,
+                            "pdf_hash": event.get('pdf_hash', ''),
+                            "error": event.get('error', ''),
+                            "timestamp": event.get('timestamp', '')
+                        })
+                    
+                    # Recolectar tiempos de procesamiento
+                    if event.get('elapsed_ms'):
+                        stats["processing_times"].append(event['elapsed_ms'])
+                    
+                    # Recolectar scores de confianza
+                    if event.get('confidence_score'):
+                        stats["confidence_scores"].append(event['confidence_score'])
+                        
+                except json.JSONDecodeError:
+                    continue
+        
+        # Calcular estadísticas
+        if stats["processing_times"]:
+            stats["avg_processing_time_ms"] = sum(stats["processing_times"]) / len(stats["processing_times"])
+            stats["min_processing_time_ms"] = min(stats["processing_times"])
+            stats["max_processing_time_ms"] = max(stats["processing_times"])
+        
+        if stats["confidence_scores"]:
+            stats["avg_confidence_score"] = sum(stats["confidence_scores"]) / len(stats["confidence_scores"])
+            stats["min_confidence_score"] = min(stats["confidence_scores"])
+            stats["max_confidence_score"] = max(stats["confidence_scores"])
+        
+        stats["error_rate"] = len(stats["errors"]) / stats["total_events"] if stats["total_events"] > 0 else 0
+        
+    except Exception as e:
+        stats["error"] = f"Error procesando logs: {e}"
+    
+    return stats
